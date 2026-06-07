@@ -64,6 +64,7 @@ class Database:
                 start_hour INTEGER,
                 start_minute INTEGER,
                 button_text TEXT,
+                edit_message TEXT,
                 is_active INTEGER DEFAULT 1,
                 last_sent_at TIMESTAMP
             )
@@ -76,7 +77,9 @@ class Database:
                 username TEXT,
                 first_name TEXT,
                 button_text TEXT,
-                clicked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                reaction_time REAL,
+                clicked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP
             )
         ''')
         self.conn.commit()
@@ -120,15 +123,15 @@ class Database:
                       hour=None, minute=None,
                       interval_minutes=None,
                       start_hour=None, start_minute=None,
-                      button_text=None):
+                      button_text=None, edit_message=None):
         cursor = self.conn.cursor()
         cursor.execute('''
             INSERT INTO broadcasts
             (group_id, name, content_type, text, photo_file_id, schedule_type,
-             hour, minute, interval_minutes, start_hour, start_minute, button_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             hour, minute, interval_minutes, start_hour, start_minute, button_text, edit_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (group_id, name, content_type, text, photo_file_id, schedule_type,
-              hour, minute, interval_minutes, start_hour, start_minute, button_text))
+              hour, minute, interval_minutes, start_hour, start_minute, button_text, edit_message))
         self.conn.commit()
         return cursor.lastrowid
     
@@ -144,8 +147,8 @@ class Database:
             'text': r[4], 'photo_file_id': r[5], 'schedule_type': r[6],
             'hour': r[7], 'minute': r[8], 'interval_minutes': r[9],
             'start_hour': r[10], 'start_minute': r[11],
-            'button_text': r[12],
-            'is_active': bool(r[13]), 'last_sent_at': r[14]
+            'button_text': r[12], 'edit_message': r[13],
+            'is_active': bool(r[14]), 'last_sent_at': r[15]
         } for r in rows]
     
     def get_broadcast(self, broadcast_id):
@@ -158,8 +161,8 @@ class Database:
                 'text': r[4], 'photo_file_id': r[5], 'schedule_type': r[6],
                 'hour': r[7], 'minute': r[8], 'interval_minutes': r[9],
                 'start_hour': r[10], 'start_minute': r[11],
-                'button_text': r[12],
-                'is_active': bool(r[13]), 'last_sent_at': r[14]
+                'button_text': r[12], 'edit_message': r[13],
+                'is_active': bool(r[14]), 'last_sent_at': r[15]
             }
         return None
     
@@ -188,18 +191,18 @@ class Database:
         cursor.execute('UPDATE broadcasts SET last_sent_at = CURRENT_TIMESTAMP WHERE id = ?', (broadcast_id,))
         self.conn.commit()
     
-    def save_click(self, broadcast_id, user_id, username, first_name, button_text):
+    def save_click(self, broadcast_id, user_id, username, first_name, button_text, reaction_time, sent_at):
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO button_clicks (broadcast_id, user_id, username, first_name, button_text)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (broadcast_id, user_id, username, first_name, button_text))
+            INSERT INTO button_clicks (broadcast_id, user_id, username, first_name, button_text, reaction_time, sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (broadcast_id, user_id, username, first_name, button_text, reaction_time, sent_at))
         self.conn.commit()
     
     def get_clicks(self, broadcast_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT user_id, username, first_name, button_text, clicked_at 
+            SELECT user_id, username, first_name, button_text, reaction_time, clicked_at, sent_at
             FROM button_clicks WHERE broadcast_id = ? ORDER BY clicked_at DESC
         ''', (broadcast_id,))
         return cursor.fetchall()
@@ -208,6 +211,28 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE broadcast_id = ?', (broadcast_id,))
         return cursor.fetchone()[0]
+    
+    def get_top_fastest(self, broadcast_id, limit=20):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT user_id, username, first_name, reaction_time, clicked_at
+            FROM button_clicks
+            WHERE broadcast_id = ? AND reaction_time IS NOT NULL
+            ORDER BY reaction_time ASC
+            LIMIT ?
+        ''', (broadcast_id, limit))
+        return cursor.fetchall()
+    
+    def get_user_best_time(self, broadcast_id, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT reaction_time, clicked_at
+            FROM button_clicks
+            WHERE broadcast_id = ? AND user_id = ?
+            ORDER BY reaction_time ASC
+            LIMIT 1
+        ''', (broadcast_id, user_id))
+        return cursor.fetchone()
 
 db = Database()
 
@@ -222,12 +247,23 @@ async def send_to_admin(text):
         except:
             pass
 
+def format_time(seconds):
+    if seconds < 1:
+        return f"{int(seconds * 1000)} мс"
+    elif seconds < 60:
+        return f"{seconds:.1f} сек"
+    else:
+        mins = int(seconds // 60)
+        secs = seconds % 60
+        return f"{mins} мин {secs:.0f} сек"
+
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Группы", callback_data="menu_groups")],
         [InlineKeyboardButton(text="➕ Создать рассылку", callback_data="menu_create")],
         [InlineKeyboardButton(text="📋 Все рассылки", callback_data="menu_list")],
         [InlineKeyboardButton(text="📊 Статистика кнопок", callback_data="menu_stats_buttons")],
+        [InlineKeyboardButton(text="🏆 Топ быстрых", callback_data="menu_top")],
         [InlineKeyboardButton(text="⏸ Вкл/Выкл все", callback_data="menu_toggle_all")],
         [InlineKeyboardButton(text="📈 Общая статистика", callback_data="menu_stats")]
     ])
@@ -244,29 +280,115 @@ async def send_broadcast(broadcast_id):
     
     try:
         chat_id = int(group['chat_id'])
+        sent_at = datetime.now(pytz.timezone(TIMEZONE))
+        
         reply_markup = None
         if b.get('button_text'):
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=b['button_text'], callback_data=f"btn_{broadcast_id}")]
             ])
         
+        # Отправляем сообщение с кнопкой
         if b['content_type'] == 'text':
-            await bot.send_message(chat_id, b['text'], reply_markup=reply_markup)
-        elif b['content_type'] == 'photo' and b['photo_file_id']:
-            await bot.send_photo(chat_id, b['photo_file_id'], caption=b['text'] or '', reply_markup=reply_markup)
+            msg = await bot.send_message(chat_id, b['text'], reply_markup=reply_markup)
+        else:
+            msg = await bot.send_photo(chat_id, b['photo_file_id'], caption=b['text'] or '', reply_markup=reply_markup)
         
+        # Сохраняем информацию о времени отправки и ID сообщения
         db.update_last_sent(broadcast_id)
-        logger.info(f"✅ Отправлено в {group['name']}")
+        
+        # Сохраняем время отправки в отдельном месте (можно в broadcast)
+        cursor = db.conn.cursor()
+        cursor.execute('UPDATE broadcasts SET last_sent_at = ? WHERE id = ?', (sent_at.isoformat(), broadcast_id))
+        db.conn.commit()
+        
+        logger.info(f"✅ Отправлено в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
         
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
-            logger.info(f"🔄 Перепланировано: след. через {b['interval_minutes']} мин")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
 
+# ==================== ОБРАБОТЧИК НАЖАТИЙ КНОПОК ====================
+@dp.callback_query(lambda c: c.data and c.data.startswith("btn_"))
+async def handle_button_click(call: CallbackQuery):
+    broadcast_id = int(call.data.split("_")[1])
+    user = call.from_user
+    broadcast = db.get_broadcast(broadcast_id)
+    
+    if not broadcast:
+        await call.answer("❌ Рассылка не найдена", show_alert=True)
+        return
+    
+    button_text = broadcast['button_text']
+    edit_template = broadcast.get('edit_message') or "✅ Нажал: {name}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
+    
+    # Время нажатия
+    click_time = datetime.now(pytz.timezone(TIMEZONE))
+    
+    # Вычисляем время реакции
+    reaction_time = None
+    sent_at_str = broadcast.get('last_sent_at')
+    if sent_at_str:
+        try:
+            sent_at = datetime.fromisoformat(sent_at_str)
+            if sent_at.tzinfo is None:
+                sent_at = pytz.timezone(TIMEZONE).localize(sent_at)
+            reaction_time = (click_time - sent_at).total_seconds()
+        except:
+            pass
+    
+    # Сохраняем нажатие
+    db.save_click(
+        broadcast_id=broadcast_id,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        button_text=button_text,
+        reaction_time=reaction_time,
+        sent_at=sent_at_str
+    )
+    
+    # Формируем текст для редактирования
+    user_name = user.first_name or user.username or str(user.id)
+    time_str = click_time.strftime('%d.%m.%Y %H:%M:%S')
+    reaction_str = format_time(reaction_time) if reaction_time else "неизвестно"
+    
+    edit_text = edit_template.format(
+        name=user_name,
+        user_id=user.id,
+        username=user.username or "нет",
+        time=time_str,
+        reaction=reaction_str,
+        button=button_text
+    )
+    
+    # Редактируем сообщение
+    try:
+        await call.message.edit_text(edit_text, parse_mode="Markdown")
+        await call.answer(f"✅ Ваш голос учтён! Время реакции: {reaction_str}", show_alert=False)
+    except Exception as e:
+        logger.error(f"Ошибка редактирования: {e}")
+        await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
+    
+    # Уведомляем админа
+    await send_to_admin(
+        f"🔘 **Нажатие на кнопку!**\n\n"
+        f"📢 Рассылка: {broadcast['name']}\n"
+        f"👤 Пользователь: {user.first_name} (@{user.username or 'нет'})\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"🔘 Кнопка: {button_text}\n"
+        f"⚡ Время реакции: {reaction_str}\n"
+        f"🕐 Время нажатия: {time_str}"
+    )
+    
+    logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}, реакция: {reaction_str}")
+
+# ==================== ЗАГРУЗКА РАССЫЛОК ====================
 async def load_broadcasts():
     for b in db.get_all_broadcasts():
         if not b['is_active']:
@@ -298,6 +420,8 @@ async def cmd_start(message: Message):
             f"✅ **Бот для рассылок с кнопками!**\n\n"
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
             f"👨‍💻 Затем используй /admin\n\n"
+            f"🏆 **Новое:** При нажатии на кнопку замеряется время реакции!\n"
+            f"📊 Команда `/top` — показать самых быстрых\n\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
@@ -316,25 +440,60 @@ async def cmd_admin(message: Message):
 async def cmd_id(message: Message):
     await message.answer(f"🆔 ID чата: `{message.chat.id}`", parse_mode="Markdown")
 
-# ==================== ОБРАБОТЧИК НАЖАТИЙ КНОПОК ====================
-@dp.callback_query(lambda c: c.data and c.data.startswith("btn_"))
-async def handle_button_click(call: CallbackQuery):
-    broadcast_id = int(call.data.split("_")[1])
-    user = call.from_user
-    broadcast = db.get_broadcast(broadcast_id)
-    button_text = broadcast['button_text'] if broadcast else "неизвестно"
+@dp.message(Command("top"))
+async def cmd_top(message: Message):
+    """Показать топ самых быстрых нажатий по последней рассылке"""
+    broadcasts = db.get_all_broadcasts()
+    if not broadcasts:
+        await message.answer("📭 Нет рассылок")
+        return
     
-    db.save_click(broadcast_id, user.id, user.username, user.first_name, button_text)
-    await call.answer(f"✅ Вы нажали: {button_text}", show_alert=False)
-    await send_to_admin(
-        f"🔘 **Нажатие на кнопку!**\n\n"
-        f"📢 Рассылка: {broadcast['name'] if broadcast else '?'}\n"
-        f"👤 Пользователь: {user.first_name} (@{user.username or 'нет'})\n"
-        f"🆔 ID: `{user.id}`\n"
-        f"🔘 Кнопка: {button_text}\n"
-        f"🕐 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}")
+    # Берём последнюю активную рассылку с кнопкой
+    last_broadcast = None
+    for b in reversed(broadcasts):
+        if b.get('button_text') and b['is_active']:
+            last_broadcast = b
+            break
+    
+    if not last_broadcast:
+        await message.answer("📭 Нет рассылок с кнопками")
+        return
+    
+    top = db.get_top_fastest(last_broadcast['id'], 20)
+    
+    if not top:
+        await message.answer(f"📭 Нет нажатий на кнопку рассылки **{last_broadcast['name']}**", parse_mode="Markdown")
+        return
+    
+    text = f"🏆 **Самые быстрые пальцы!**\n\n"
+    text += f"📢 Рассылка: **{last_broadcast['name']}**\n"
+    text += f"🔘 Кнопка: `{last_broadcast['button_text']}`\n\n"
+    text += "**Рейтинг:**\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(top):
+        user_id, username, first_name, reaction_time, clicked_at = row
+        name = first_name or username or str(user_id)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        time_str = format_time(reaction_time) if reaction_time else "? сек"
+        
+        # Обрезаем слишком длинные имена
+        if len(name) > 20:
+            name = name[:17] + "..."
+        
+        text += f"{medal} **{name}** — {time_str}\n"
+    
+    # Добавляем информацию о пользователе, если он есть в топе
+    user_top = db.get_user_best_time(last_broadcast['id'], message.from_user.id)
+    if user_top:
+        reaction_time, clicked_at = user_top
+        text += f"\n📊 **Ваш лучший результат:** {format_time(reaction_time)}"
+    else:
+        text += f"\n📊 Вы ещё не нажимали на кнопку этой рассылки."
+    
+    text += f"\n\n👆 Всего нажатий: {db.get_clicks_count(last_broadcast['id'])}"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 # ==================== CALLBACK ОБРАБОТЧИК МЕНЮ ====================
 @dp.callback_query()
@@ -346,7 +505,6 @@ async def handle_callback(call: CallbackQuery):
     data = call.data
     await call.answer()
     
-    # Главные меню
     if data == "menu_groups":
         await show_groups(call.message)
     elif data == "menu_create":
@@ -355,6 +513,8 @@ async def handle_callback(call: CallbackQuery):
         await show_broadcasts(call.message)
     elif data == "menu_stats_buttons":
         await show_buttons_stats(call.message)
+    elif data == "menu_top":
+        await show_top_selector(call.message)
     elif data == "menu_toggle_all":
         await toggle_all(call.message)
     elif data == "menu_stats":
@@ -452,6 +612,11 @@ async def handle_callback(call: CallbackQuery):
     elif data.startswith("stats_"):
         bid = int(data.split("_")[1])
         await show_broadcast_stats(call.message, bid)
+    
+    # Топ для конкретной рассылки
+    elif data.startswith("top_"):
+        bid = int(data.split("_")[1])
+        await show_broadcast_top(call.message, bid)
 
 # ==================== ОТОБРАЖЕНИЕ МЕНЮ ====================
 async def show_groups(message):
@@ -543,6 +708,59 @@ async def show_buttons_stats(message):
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
+async def show_top_selector(message):
+    broadcasts = [b for b in db.get_all_broadcasts() if b.get('button_text')]
+    if not broadcasts:
+        await message.edit_text("📭 **Нет рассылок с кнопками**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
+        return
+    
+    text = "🏆 **Выберите рассылку для топа**\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for b in broadcasts:
+        cnt = db.get_clicks_count(b['id'])
+        text += f"🔘 {b['name']} — {cnt} нажатий\n"
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"🏆 {b['name'][:25]}", callback_data=f"top_{b['id']}")])
+    
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
+    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+async def show_broadcast_top(message, broadcast_id):
+    b = db.get_broadcast(broadcast_id)
+    if not b:
+        await message.answer("❌ Рассылка не найдена")
+        return
+    
+    top = db.get_top_fastest(broadcast_id, 20)
+    
+    if not top:
+        await message.edit_text(f"📭 Нет нажатий на кнопку рассылки **{b['name']}**", parse_mode="Markdown")
+        return
+    
+    text = f"🏆 **Самые быстрые пальцы!**\n\n"
+    text += f"📢 Рассылка: **{b['name']}**\n"
+    text += f"🔘 Кнопка: `{b['button_text']}`\n\n"
+    text += "**Рейтинг:**\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(top):
+        user_id, username, first_name, reaction_time, clicked_at = row
+        name = first_name or username or str(user_id)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        time_str = format_time(reaction_time) if reaction_time else "? сек"
+        
+        if len(name) > 20:
+            name = name[:17] + "..."
+        
+        text += f"{medal} **{name}** — {time_str}\n"
+    
+    text += f"\n👆 Всего нажатий: {db.get_clicks_count(broadcast_id)}"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_top")]
+    ])
+    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
 async def show_broadcast_stats(message, broadcast_id):
     b = db.get_broadcast(broadcast_id)
     if not b:
@@ -557,7 +775,7 @@ async def show_broadcast_stats(message, broadcast_id):
     if clicks:
         text += "**Последние нажатия:**\n"
         for click in clicks[:20]:
-            _, uid, username, first_name, _, clicked_at = click
+            _, uid, username, first_name, _, clicked_at, sent_at = click
             name = first_name or username or str(uid)
             text += f"• {name} (@{username or '-'}) — {clicked_at[:16]}\n"
         if len(clicks) > 20:
@@ -566,6 +784,7 @@ async def show_broadcast_stats(message, broadcast_id):
         text += "Пока нет нажатий на кнопку."
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Топ быстрых", callback_data=f"top_{broadcast_id}")],
         [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_stats_buttons")]
     ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -689,8 +908,41 @@ async def handle_input(message: Message):
     elif step == "button":
         if message.text.lower() in ["пропустить", "skip", "-"]:
             state["button_text"] = None
+            state["edit_message"] = None
+            state["step"] = "schedule_type"
+            await message.answer(
+                "⏰ **Тип расписания**\n\n"
+                "`1` - В определённое время (ежедневно)\n"
+                "`2` - Простой интервал (каждые X минут)\n"
+                "`3` - Старт в указанное время + интервал\n\n"
+                "Отправьте 1, 2 или 3:",
+                parse_mode="Markdown"
+            )
         else:
             state["button_text"] = message.text[:50]
+            state["step"] = "edit_message"
+            await message.answer(
+                "✏️ **Текст после нажатия**\n\n"
+                "Отправьте текст, который будет показан после нажатия на кнопку.\n\n"
+                "**Доступные переменные:**\n"
+                "`{name}` - имя пользователя\n"
+                "`{user_id}` - ID пользователя\n"
+                "`{username}` - username\n"
+                "`{time}` - время нажатия\n"
+                "`{reaction}` - время реакции\n"
+                "`{button}` - текст кнопки\n\n"
+                "Пример:\n"
+                "`✅ Спасибо, {name}!\\n🕐 Время: {time}\\n⚡ Реакция: {reaction}`\n\n"
+                "Или отправьте `пропустить` для стандартного текста",
+                parse_mode="Markdown"
+            )
+    
+    # Шаг 4b: Текст после нажатия
+    elif step == "edit_message":
+        if message.text.lower() in ["пропустить", "skip", "-"]:
+            state["edit_message"] = "✅ Нажал: {name}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
+        else:
+            state["edit_message"] = message.text
         state["step"] = "schedule_type"
         await message.answer(
             "⏰ **Тип расписания**\n\n"
@@ -783,7 +1035,8 @@ async def save_broadcast(message, state):
         interval_minutes=state.get("interval_minutes"),
         start_hour=state.get("start_hour"),
         start_minute=state.get("start_minute"),
-        button_text=state.get("button_text")
+        button_text=state.get("button_text"),
+        edit_message=state.get("edit_message")
     )
     
     b = db.get_broadcast(broadcast_id)
@@ -799,11 +1052,17 @@ async def save_broadcast(message, state):
     group = db.get_target_group(state["group_id"])
     
     btn_info = f"\n🔘 Кнопка: `{state['button_text']}`" if state.get('button_text') else ""
+    edit_info = "\n✏️ После нажатия: сообщение редактируется" if state.get('button_text') else ""
+    
     await message.answer(
         f"✅ **Рассылка создана!**\n\n"
         f"📢 Название: {state['name']}\n"
-        f"📬 Группа: {group['name']}{btn_info}\n\n"
-        f"📌 При нажатии на кнопку статистика будет собираться в админ-панели.",
+        f"📬 Группа: {group['name']}{btn_info}{edit_info}\n\n"
+        f"📌 При нажатии на кнопку:\n"
+        f"   • Замеряется время реакции\n"
+        f"   • Сообщение заменяется на указанный текст\n"
+        f"   • Ведётся статистика для топа\n\n"
+        f"🏆 Команда `/top` — показать самых быстрых",
         parse_mode="Markdown"
     )
     
@@ -829,7 +1088,7 @@ async def main():
     logger.info("✅ Бот готов к работе!")
     
     if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот перезапущен и готов к работе!**")
+        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n🏆 Теперь при нажатии на кнопку замеряется время реакции!\n📊 Команда `/top` — показать самых быстрых")
     
     await dp.start_polling(bot)
 
