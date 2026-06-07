@@ -1,8 +1,12 @@
-[phases.setup]
-nixPkgs = ["python311"]
+[build]
+nixPkgs = ["python312"]
 
-[phases.install]
+[phases.setup]
 cmds = ["pip install -r requirements.txt"]
 
 [phases.start]
 cmd = "python bot.py"
+
+[env]
+MISE_PYTHON_GITHUB_ATTESTATIONS = "false"
+PYTHONUNBUFFERED = "1"
