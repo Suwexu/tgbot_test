@@ -209,8 +209,98 @@ class Database:
         cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE broadcast_id = ?', (broadcast_id,))
         return cursor.fetchone()[0]
     
+    # Методы для общего топа по всем рассылкам
+    def get_top_fastest_all(self, limit=20):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT 
+                user_id, 
+                username, 
+                first_name, 
+                ROUND(AVG(reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks
+            WHERE reaction_time IS NOT NULL
+            GROUP BY user_id
+            ORDER BY avg_time ASC
+            LIMIT ?
+        ''', (limit,))
+        return cursor.fetchall()
+    
+    def get_user_stats_all(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT 
+                ROUND(AVG(reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks
+            WHERE user_id = ? AND reaction_time IS NOT NULL
+        ''', (user_id,))
+        return cursor.fetchone()
+    
+    def get_total_clicks_all(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE reaction_time IS NOT NULL')
+        return cursor.fetchone()[0]
+    
+    def get_total_users_all(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(DISTINCT user_id) FROM button_clicks WHERE reaction_time IS NOT NULL')
+        return cursor.fetchone()[0]
+    
+    # Методы для топа по конкретной группе
+    def get_top_fastest_by_group(self, group_id, limit=20):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT 
+                bc.user_id, 
+                bc.username, 
+                bc.first_name, 
+                ROUND(AVG(bc.reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+            GROUP BY bc.user_id
+            ORDER BY avg_time ASC
+            LIMIT ?
+        ''', (group_id, limit))
+        return cursor.fetchall()
+    
+    def get_user_stats_by_group(self, group_id, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT 
+                ROUND(AVG(bc.reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.user_id = ? AND bc.reaction_time IS NOT NULL
+        ''', (group_id, user_id))
+        return cursor.fetchone()
+    
+    def get_total_clicks_by_group(self, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) 
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+        ''', (group_id,))
+        return cursor.fetchone()[0]
+    
+    def get_total_users_by_group(self, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(DISTINCT bc.user_id)
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+        ''', (group_id,))
+        return cursor.fetchone()[0]
+    
+    # Методы для топа по конкретной рассылке
     def get_top_fastest(self, broadcast_id, limit=20):
-        """Возвращает топ пользователей по средней скорости реакции (без лучшего результата)"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT 
@@ -228,7 +318,6 @@ class Database:
         return cursor.fetchall()
     
     def get_user_stats(self, broadcast_id, user_id):
-        """Возвращает статистику пользователя по рассылке (только средний результат)"""
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT 
@@ -265,7 +354,6 @@ def format_time(seconds):
         return f"{mins} мин {secs:.0f} сек"
 
 def get_user_mention(user):
-    """Создаёт упоминание пользователя"""
     if user.username:
         return f"@{user.username}"
     else:
@@ -334,10 +422,8 @@ async def handle_button_click(call: CallbackQuery):
     button_text = broadcast['button_text']
     edit_template = broadcast.get('edit_message') or "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
     
-    # Время нажатия
     click_time = datetime.now(pytz.timezone(TIMEZONE))
     
-    # Вычисляем время реакции
     reaction_time = None
     sent_at_str = broadcast.get('last_sent_at')
     if sent_at_str:
@@ -349,7 +435,6 @@ async def handle_button_click(call: CallbackQuery):
         except:
             pass
     
-    # Сохраняем нажатие
     db.save_click(
         broadcast_id=broadcast_id,
         user_id=user.id,
@@ -360,7 +445,6 @@ async def handle_button_click(call: CallbackQuery):
         sent_at=sent_at_str
     )
     
-    # Создаём упоминание пользователя
     mention = get_user_mention(user)
     user_name = user.first_name or user.username or str(user.id)
     time_str = click_time.strftime('%d.%m.%Y %H:%M:%S')
@@ -376,7 +460,6 @@ async def handle_button_click(call: CallbackQuery):
         button=button_text
     )
     
-    # Редактируем сообщение с HTML-форматированием для упоминаний
     try:
         await call.message.edit_text(edit_text, parse_mode="HTML")
         await call.answer(f"✅ Ваш голос учтён! Время реакции: {reaction_str}", show_alert=False)
@@ -384,7 +467,6 @@ async def handle_button_click(call: CallbackQuery):
         logger.error(f"Ошибка редактирования: {e}")
         await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
     
-    # Уведомляем админа
     await send_to_admin(
         f"🔘 **Нажатие на кнопку!**\n\n"
         f"📢 Рассылка: {broadcast['name']}\n"
@@ -429,20 +511,18 @@ async def cmd_start(message: Message):
             f"✅ **Бот для рассылок с кнопками!**\n\n"
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
             f"👨‍💻 Затем напиши /admin в личные сообщения\n\n"
-            f"📊 Команда `/top` — показать среднюю скорость реакции сотрудников\n\n"
+            f"📊 Команда `/top` в группе — показать статистику реакции сотрудников\n\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
-    # Только администратор может использовать /admin
     if not is_admin(message.from_user.id):
         await message.answer("⛔ У вас нет доступа к этой команде. Только администратор бота может управлять рассылками.")
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /admin от {message.from_user.id}")
         return
     
-    # Если админская группа настроена, проверяем что команда отправлена из неё или в личку
     if ADMIN_GROUP_ID and message.chat.id != ADMIN_GROUP_ID and message.chat.type != 'private':
         await message.answer(f"⛔ Управление доступно только в админской группе или личных сообщениях.\n📢 ID админской группы: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
         return
@@ -455,32 +535,54 @@ async def cmd_id(message: Message):
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
-    """Показать список времени реакции сотрудников (средняя скорость)"""
-    broadcasts = db.get_all_broadcasts()
-    if not broadcasts:
-        await message.answer("📭 Нет рассылок")
+    """Показать топ реакции сотрудников для текущей группы"""
+    
+    if message.chat.type not in ['group', 'supergroup']:
+        await message.answer(
+            "📊 **Команда `/top` работает только в группах!**\n\n"
+            "Добавьте бота в группу, сделайте администратором, "
+            "а затем отправьте `/top` в этой группе, чтобы увидеть статистику реакции сотрудников.",
+            parse_mode="Markdown"
+        )
         return
     
-    # Берём последнюю активную рассылку с кнопкой
-    last_broadcast = None
-    for b in reversed(broadcasts):
-        if b.get('button_text') and b['is_active']:
-            last_broadcast = b
-            break
+    chat_id = str(message.chat.id)
+    group = db.get_target_group_by_chat_id(chat_id)
     
-    if not last_broadcast:
-        await message.answer("📭 Нет рассылок с кнопками")
+    if not group:
+        await message.answer(
+            "❌ **Группа не зарегистрирована в боте!**\n\n"
+            "Отправьте команду `/start` в этой группе, чтобы зарегистрировать её.",
+            parse_mode="Markdown"
+        )
         return
     
-    top = db.get_top_fastest(last_broadcast['id'], 20)
+    if not group['is_active']:
+        await message.answer(
+            "⛔ **Группа отключена администратором**\n\n"
+            "Рассылки в эту группу временно не отправляются.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    top = db.get_top_fastest_by_group(group['id'], 20)
     
     if not top:
-        await message.answer(f"📭 Нет нажатий на кнопку рассылки **{last_broadcast['name']}**", parse_mode="Markdown")
+        await message.answer(
+            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
+            f"Пока никто не нажимал на кнопки в рассылках этой группы.\n"
+            f"Дождитесь следующей рассылки с кнопкой.",
+            parse_mode="Markdown"
+        )
         return
     
-    text = f"📊 **Список времени реакции сотрудников на сообщения**\n\n"
-    text += f"📢 Рассылка: **{last_broadcast['name']}**\n"
-    text += f"🔘 Кнопка: `{last_broadcast['button_text']}`\n\n"
+    total_clicks = db.get_total_clicks_by_group(group['id'])
+    total_users = db.get_total_users_by_group(group['id'])
+    
+    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text += f"📢 Группа: **{group['name']}**\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
     text += "**Рейтинг (по средней скорости):**\n\n"
     
     medals = ["🥇", "🥈", "🥉"]
@@ -496,27 +598,22 @@ async def cmd_top(message: Message):
         
         text += f"{medal} **{name}**\n"
         text += f"   ⚡ Средняя скорость: {avg_str}\n"
-        text += f"   👆 Количество нажатий: {clicks_count}\n\n"
+        text += f"   👆 Нажатий: {clicks_count}\n\n"
     
-    # Добавляем информацию о пользователе, если он есть в топе
-    user_stats = db.get_user_stats(last_broadcast['id'], message.from_user.id)
+    user_stats = db.get_user_stats_by_group(group['id'], message.from_user.id)
     if user_stats and user_stats[1] > 0:
         avg_time, clicks_count = user_stats
         text += f"📊 **Ваша статистика:**\n"
         text += f"   ⚡ Средняя скорость: {format_time(avg_time)}\n"
         text += f"   👆 Всего нажатий: {clicks_count}\n"
     else:
-        text += f"\n📊 Вы ещё не нажимали на кнопку этой рассылки."
-    
-    total_users = len(top)
-    text += f"\n👥 Всего участников: {total_users}"
+        text += f"\n📊 Вы ещё не нажимали на кнопки в этой группе."
     
     await message.answer(text, parse_mode="Markdown")
 
 # ==================== CALLBACK ОБРАБОТЧИК МЕНЮ ====================
 @dp.callback_query()
 async def handle_callback(call: CallbackQuery):
-    # Только администратор может управлять ботом
     if not is_admin(call.from_user.id):
         await call.answer("⛔ Нет доступа", show_alert=True)
         logger.warning(f"⚠️ Неавторизованный callback от {call.from_user.id}")
@@ -541,13 +638,13 @@ async def handle_callback(call: CallbackQuery):
         await show_stats(call.message)
     elif data == "back_to_main":
         await call.message.edit_text("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
+    elif data == "top_all":
+        await show_all_broadcasts_top(call.message)
     
-    # Добавление группы
     elif data == "add_group":
         admin_states[call.from_user.id] = {"step": "add_group_id"}
         await call.message.answer("📢 Введите ID группы (число):\nПример: -1001234567890")
     
-    # Управление группами
     elif data.startswith("group_toggle_"):
         gid = int(data.split("_")[2])
         group = db.get_target_group(gid)
@@ -585,7 +682,6 @@ async def handle_callback(call: CallbackQuery):
         gid = int(data.split("_")[2])
         await show_group_broadcasts(call.message, gid)
     
-    # Управление рассылками
     elif data.startswith("broadcast_toggle_"):
         bid = int(data.split("_")[2])
         b = db.get_broadcast(bid)
@@ -616,7 +712,6 @@ async def handle_callback(call: CallbackQuery):
             await call.message.answer(f"🗑 Рассылка {b['name']} удалена")
             await show_broadcasts(call.message)
     
-    # Выбор группы для создания рассылки
     elif data.startswith("select_group_"):
         gid = int(data.split("_")[2])
         group = db.get_target_group(gid)
@@ -628,15 +723,17 @@ async def handle_callback(call: CallbackQuery):
             }
             await call.message.answer(f"📝 Создание рассылки для **{group['name']}**\n\nВведите название:", parse_mode="Markdown")
     
-    # Статистика кнопок
     elif data.startswith("stats_"):
         bid = int(data.split("_")[1])
         await show_broadcast_stats(call.message, bid)
     
-    # Топ для конкретной рассылки
     elif data.startswith("top_"):
         bid = int(data.split("_")[1])
         await show_broadcast_top(call.message, bid)
+    
+    elif data.startswith("top_group_"):
+        group_id = int(data.split("_")[2])
+        await show_group_top(call.message, group_id)
 
 # ==================== ОТОБРАЖЕНИЕ МЕНЮ ====================
 async def show_groups(message):
@@ -729,24 +826,35 @@ async def show_buttons_stats(message):
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_top_selector(message):
+    groups = db.get_all_target_groups()
     broadcasts = [b for b in db.get_all_broadcasts() if b.get('button_text')]
-    if not broadcasts:
-        await message.edit_text("📭 **Нет рассылок с кнопками**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
-        return
     
-    text = "📊 **Выберите рассылку для просмотра времени реакции**\n\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    text = "📊 **Выберите режим просмотра**\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Общий топ (все группы)", callback_data="top_all")]
+    ])
     
-    for b in broadcasts:
-        cnt = db.get_clicks_count(b['id'])
-        text += f"🔘 {b['name']} — {cnt} нажатий\n"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📈 {b['name'][:25]}", callback_data=f"top_{b['id']}")])
+    if groups:
+        text += "**Или выберите группу:**\n\n"
+        for g in groups:
+            cnt = db.get_total_clicks_by_group(g['id'])
+            status = "✅" if g['is_active'] else "⛔"
+            text += f"{status} **{g['name']}** — {cnt} нажатий\n"
+            keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📊 {g['name'][:25]}", callback_data=f"top_group_{g['id']}")])
+    
+    if broadcasts:
+        text += "\n**Или выберите конкретную рассылку:**\n\n"
+        for b in broadcasts:
+            cnt = db.get_clicks_count(b['id'])
+            group = db.get_target_group(b['group_id'])
+            gname = group['name'] if group else "?"
+            text += f"🔘 {b['name']} ({gname}) — {cnt} нажатий\n"
+            keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📨 {b['name'][:25]}", callback_data=f"top_{b['id']}")])
     
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_broadcast_top(message, broadcast_id):
-    """Показать топ для выбранной рассылки (только средняя скорость)"""
     b = db.get_broadcast(broadcast_id)
     if not b:
         await message.answer("❌ Рассылка не найдена")
@@ -758,7 +866,7 @@ async def show_broadcast_top(message, broadcast_id):
         await message.edit_text(f"📭 Нет нажатий на кнопку рассылки **{b['name']}**", parse_mode="Markdown")
         return
     
-    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text = f"📊 **Статистика по рассылке**\n\n"
     text += f"📢 Рассылка: **{b['name']}**\n"
     text += f"🔘 Кнопка: `{b['button_text']}`\n\n"
     text += "**Рейтинг (по средней скорости):**\n\n"
@@ -778,11 +886,93 @@ async def show_broadcast_top(message, broadcast_id):
         text += f"   ⚡ Средняя скорость: {avg_str}\n"
         text += f"   👆 Нажатий: {clicks_count}\n\n"
     
-    total_users = len(top)
-    text += f"\n👥 Всего участников: {total_users}"
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_top")]
+    ])
+    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+async def show_group_top(message, group_id):
+    group = db.get_target_group(group_id)
+    if not group:
+        await message.answer("❌ Группа не найдена")
+        return
+    
+    top = db.get_top_fastest_by_group(group_id, 20)
+    
+    if not top:
+        await message.edit_text(
+            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
+            f"Пока никто не нажимал на кнопки в рассылках этой группы.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    total_clicks = db.get_total_clicks_by_group(group_id)
+    total_users = db.get_total_users_by_group(group_id)
+    
+    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text += f"📢 Группа: **{group['name']}**\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(top):
+        user_id, username, first_name, avg_time, clicks_count = row
+        name = first_name or username or str(user_id)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        
+        avg_str = format_time(avg_time)
+        
+        if len(name) > 20:
+            name = name[:17] + "..."
+        
+        text += f"{medal} **{name}**\n"
+        text += f"   ⚡ Средняя скорость: {avg_str}\n"
+        text += f"   👆 Нажатий: {clicks_count}\n\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
+    ])
+    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+async def show_all_broadcasts_top(message):
+    top = db.get_top_fastest_all(20)
+    
+    if not top:
+        await message.edit_text(
+            "📭 **Нет данных о реакции сотрудников**\n\n"
+            "Пока никто не нажимал на кнопки в рассылках.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    total_clicks = db.get_total_clicks_all()
+    total_users = db.get_total_users_all()
+    
+    text = f"📊 **Общий список времени реакции сотрудников**\n\n"
+    text += f"📅 Данные собраны за всё время работы бота\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(top):
+        user_id, username, first_name, avg_time, clicks_count = row
+        name = first_name or username or str(user_id)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        
+        avg_str = format_time(avg_time)
+        
+        if len(name) > 20:
+            name = name[:17] + "..."
+        
+        text += f"{medal} **{name}**\n"
+        text += f"   ⚡ Средняя скорость: {avg_str}\n"
+        text += f"   👆 Нажатий: {clicks_count}\n\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
     ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -879,7 +1069,6 @@ async def handle_input(message: Message):
     state = admin_states[message.from_user.id]
     step = state.get("step")
     
-    # Добавление группы по ID
     if step == "add_group_id":
         try:
             chat_id = int(message.text.strip())
@@ -894,13 +1083,11 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Неверный ID. Введите число.")
     
-    # Шаг 1: Название
     elif step == "name":
         state["name"] = message.text
         state["step"] = "text"
         await message.answer("📝 **Введите текст рассылки**\n\nОтправьте текст, который будет отправлен в группу:", parse_mode="Markdown")
     
-    # Шаг 2: Текст рассылки
     elif step == "text":
         state["text"] = message.text
         state["step"] = "button"
@@ -911,7 +1098,6 @@ async def handle_input(message: Message):
             parse_mode="Markdown"
         )
     
-    # Шаг 3: Кнопка
     elif step == "button":
         if message.text.lower() in ["пропустить", "skip", "-"]:
             state["button_text"] = None
@@ -945,7 +1131,6 @@ async def handle_input(message: Message):
                 parse_mode="Markdown"
             )
     
-    # Шаг 4: Текст после нажатия
     elif step == "edit_message":
         if message.text.lower() in ["пропустить", "skip", "-"]:
             state["edit_message"] = "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
@@ -961,7 +1146,6 @@ async def handle_input(message: Message):
             parse_mode="Markdown"
         )
     
-    # Шаг 5: Выбор типа расписания
     elif step == "schedule_type":
         if message.text == "1":
             state["schedule_type"] = "fixed"
@@ -978,7 +1162,6 @@ async def handle_input(message: Message):
         else:
             await message.answer("❌ Отправьте 1, 2 или 3")
     
-    # Шаг 6a: Фиксированное время
     elif step == "fixed_time":
         try:
             h, m = map(int, message.text.split(':'))
@@ -991,7 +1174,6 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Неверный формат. Пример: 14:30")
     
-    # Шаг 6b: Простой интервал
     elif step == "interval":
         try:
             interval = int(message.text)
@@ -1003,7 +1185,6 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Введите положительное число")
     
-    # Шаг 6c: Стартовое время для интервальной рассылки
     elif step == "start_time":
         try:
             h, m = map(int, message.text.split(':'))
@@ -1017,7 +1198,6 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Неверный формат. Пример: 14:30")
     
-    # Шаг 7: Интервал после стартового времени
     elif step == "interval_after_start":
         try:
             interval = int(message.text)
@@ -1029,7 +1209,6 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Введите положительное число")
 
-# ==================== СОХРАНЕНИЕ РАССЫЛКИ ====================
 async def save_broadcast(message, state):
     broadcast_id = db.add_broadcast(
         group_id=state["group_id"],
@@ -1068,7 +1247,7 @@ async def save_broadcast(message, state):
         f"   • Замеряется время реакции\n"
         f"   • Сообщение заменяется на указанный текст с упоминанием\n"
         f"   • Ведётся статистика средней скорости\n\n"
-        f"📊 Команда `/top` — показать список времени реакции сотрудников",
+        f"📊 Команда `/top` в группе — показать статистику",
         parse_mode="Markdown"
     )
     
@@ -1094,7 +1273,7 @@ async def main():
     logger.info("✅ Бот готов к работе!")
     
     if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` — список времени реакции сотрудников")
+        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников")
     
     await dp.start_polling(bot)
 
