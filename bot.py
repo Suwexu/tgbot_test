@@ -36,13 +36,30 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 admin_states = {}
 
+# ==================== НАСТРОЙКА ПУТИ К БАЗЕ ДАННЫХ ====================
+# Проверяем, существует ли директория volume
+VOLUME_PATH = '/app/data'
+if os.path.exists(VOLUME_PATH) and os.path.isdir(VOLUME_PATH):
+    DB_PATH = os.path.join(VOLUME_PATH, 'bot_database.db')
+    logger.info(f"✅ Используется Volume для БД: {DB_PATH}")
+else:
+    DB_PATH = 'bot_database.db'
+    logger.info(f"⚠️ Volume не найден, используется локальная БД: {DB_PATH}")
+
 # ==================== БАЗА ДАННЫХ ====================
 import sqlite3
 
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+        # Создаём директорию для Volume, если её нет
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"📁 Создана директория для БД: {db_dir}")
+        
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.init_tables()
+        logger.info(f"✅ База данных подключена: {DB_PATH}")
     
     def init_tables(self):
         cursor = self.conn.cursor()
@@ -86,7 +103,7 @@ class Database:
             )
         ''')
         self.conn.commit()
-        logger.info("✅ База данных инициализирована")
+        logger.info("✅ Таблицы базы данных инициализированы")
     
     def add_target_group(self, chat_id, name):
         cursor = self.conn.cursor()
@@ -655,7 +672,8 @@ async def cmd_debug(message: Message):
     text += f"🕐 Часовой пояс: `{TIMEZONE}`\n"
     text += f"📅 Текущее время: `{datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
     text += f"📋 Рассылок в БД: `{len(broadcasts)}`\n"
-    text += f"⏰ Задач в планировщике: `{len(jobs)}`\n\n"
+    text += f"⏰ Задач в планировщике: `{len(jobs)}`\n"
+    text += f"💾 Путь к БД: `{DB_PATH}`\n\n"
     
     if broadcasts:
         text += "**📋 Рассылки:**\n"
@@ -683,6 +701,28 @@ async def cmd_debug(message: Message):
         text += f"• {g['name']} (`{g['chat_id']}`)\n"
     
     await message.answer(text, parse_mode="Markdown")
+
+# Команда /backup - создать бэкап базы данных
+@dp.message(Command("backup"))
+async def cmd_backup(message: Message):
+    """Создать бэкап базы данных (только для админов)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа")
+        return
+    
+    try:
+        # Отправляем файл БД
+        with open(DB_PATH, 'rb') as f:
+            await bot.send_document(
+                message.chat.id, 
+                types.BufferedInputFile(f.read(), filename='bot_database_backup.db'),
+                caption=f"📦 Бэкап базы данных от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n💾 Путь: {DB_PATH}"
+            )
+        await message.answer("✅ Бэкап базы данных создан и отправлен!")
+        logger.info(f"📦 Бэкап БД создан администратором {message.from_user.id}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка создания бэкапа: {e}")
 
 # Команда /add_viewer - добавить наблюдателя (только для админов)
 @dp.message(Command("add_viewer"))
@@ -1382,7 +1422,8 @@ async def save_broadcast(message, state):
         f"✅ **Рассылка создана!**\n\n"
         f"📢 Название: {state['name']}\n"
         f"📬 Группа: {group['name']}{btn_info}\n\n"
-        f"🔍 Команда `/debug` — диагностика",
+        f"🔍 Команда `/debug` — диагностика\n"
+        f"💾 БД сохранена в: {DB_PATH}",
         parse_mode="Markdown"
     )
     
@@ -1397,13 +1438,25 @@ async def main():
     logger.info(f"📅 Часовой пояс: {TIMEZONE}")
     logger.info(f"👑 Администраторы: {ADMIN_IDS}")
     logger.info(f"👁 Наблюдатели (/top): {TOP_VIEWERS}")
+    logger.info(f"💾 Путь к базе данных: {DB_PATH}")
+    
+    # Проверяем доступность Volume
+    if os.path.exists(VOLUME_PATH):
+        logger.info(f"✅ Volume найден по пути: {VOLUME_PATH}")
+        # Проверяем права на запись
+        if os.access(VOLUME_PATH, os.W_OK):
+            logger.info(f"✅ Есть права на запись в Volume")
+        else:
+            logger.warning(f"⚠️ Нет прав на запись в Volume!")
+    else:
+        logger.warning(f"⚠️ Volume не найден, БД будет сохранена локально")
     
     await load_broadcasts()
     scheduler.start()
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
     
-    await send_to_admin("✅ **Бот запущен!**\n🔍 /debug — диагностика")
+    await send_to_admin(f"✅ **Бот запущен!**\n💾 База данных: {DB_PATH}\n🔍 /debug — диагностика")
     
     await dp.start_polling(bot)
 
