@@ -800,6 +800,35 @@ async def cmd_add_viewer(message: Message):
         await message.answer("❌ Неверный формат ID.")
 
 # ==================== РЕДАКТИРОВАНИЕ РАССЫЛКИ ====================
+async def update_broadcast_and_reload(broadcast_id, **kwargs):
+    """Обновляет рассылку и перезагружает задачу в планировщике"""
+    db.update_broadcast(broadcast_id, **kwargs)
+    
+    b = db.get_broadcast(broadcast_id)
+    job_id = f"broadcast_{broadcast_id}"
+    
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+    
+    if b['is_active']:
+        if b['schedule_type'] == 'fixed' and b['hour'] is not None:
+            trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
+            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+        elif b['schedule_type'] == 'interval' and b['interval_minutes']:
+            trigger = IntervalTrigger(minutes=b['interval_minutes'])
+            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+        elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
+            tz = pytz.timezone(TIMEZONE)
+            now = datetime.now(tz)
+            start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+            if start_time < now:
+                if b['interval_minutes']:
+                    trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                    scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+            else:
+                trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+
 async def show_broadcast_edit_menu(message, broadcast_id):
     """Показывает меню редактирования рассылки"""
     b = db.get_broadcast(broadcast_id)
@@ -837,207 +866,6 @@ async def show_broadcast_edit_menu(message, broadcast_id):
     
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-async def update_broadcast_and_reload(broadcast_id, **kwargs):
-    """Обновляет рассылку и перезагружает задачу в планировщике"""
-    db.update_broadcast(broadcast_id, **kwargs)
-    
-    # Обновляем задачу в планировщике
-    b = db.get_broadcast(broadcast_id)
-    job_id = f"broadcast_{broadcast_id}"
-    
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-    
-    if b['is_active']:
-        if b['schedule_type'] == 'fixed' and b['hour'] is not None:
-            trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
-            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-        elif b['schedule_type'] == 'interval' and b['interval_minutes']:
-            trigger = IntervalTrigger(minutes=b['interval_minutes'])
-            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-        elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
-            tz = pytz.timezone(TIMEZONE)
-            now = datetime.now(tz)
-            start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
-            if start_time < now:
-                if b['interval_minutes']:
-                    trigger = IntervalTrigger(minutes=b['interval_minutes'])
-                    scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-            else:
-                trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
-                scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-
-# ==================== CALLBACK ОБРАБОТЧИК ====================
-@dp.callback_query()
-async def handle_callback(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
-        await call.answer("⛔ Нет доступа", show_alert=True)
-        return
-    
-    data = call.data
-    await call.answer()
-    
-    if data == "menu_groups":
-        await show_groups(call.message)
-    elif data == "menu_create":
-        await start_create(call.message)
-    elif data == "menu_list":
-        await show_broadcasts(call.message)
-    elif data == "menu_stats_buttons":
-        await show_buttons_stats(call.message)
-    elif data == "menu_top":
-        await show_top_selector(call.message)
-    elif data == "menu_toggle_all":
-        await toggle_all(call.message)
-    elif data == "menu_stats":
-        await show_stats(call.message)
-    elif data == "back_to_main":
-        await call.message.edit_text("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
-    elif data == "top_all":
-        await show_all_broadcasts_top(call.message)
-    elif data == "add_group":
-        admin_states[call.from_user.id] = {"step": "add_group_id"}
-        await call.message.answer("📢 Введите ID группы (число):\nПример: -1001234567890")
-    
-    # Редактирование рассылки
-    elif data.startswith("edit_"):
-        parts = data.split("_")
-        if len(parts) >= 3:
-            broadcast_id = int(parts[2])
-            action = parts[1]
-            
-            if action == "name":
-                admin_states[call.from_user.id] = {"step": "edit_name", "broadcast_id": broadcast_id}
-                await call.message.answer("✏️ Введите новое название рассылки:")
-            elif action == "text":
-                admin_states[call.from_user.id] = {"step": "edit_text", "broadcast_id": broadcast_id}
-                await call.message.answer("✏️ Введите новый текст рассылки:")
-            elif action == "button":
-                admin_states[call.from_user.id] = {"step": "edit_button", "broadcast_id": broadcast_id}
-                await call.message.answer("🔘 Введите новый текст кнопки (или отправьте `пропустить` чтобы убрать кнопку):", parse_mode="Markdown")
-            elif action == "editmsg":
-                admin_states[call.from_user.id] = {"step": "edit_editmsg", "broadcast_id": broadcast_id}
-                await call.message.answer(
-                    "✏️ Введите новый текст после нажатия\n\n"
-                    "Доступные переменные:\n"
-                    "`{mention}` - упоминание\n"
-                    "`{name}` - имя\n"
-                    "`{user_id}` - ID\n"
-                    "`{time}` - время\n"
-                    "`{reaction}` - время реакции\n\n"
-                    "Или отправьте `пропустить` для стандартного текста",
-                    parse_mode="Markdown"
-                )
-            elif action == "schedule":
-                admin_states[call.from_user.id] = {"step": "edit_schedule_type", "broadcast_id": broadcast_id}
-                await call.message.answer(
-                    "⏰ **Выберите новый тип расписания**\n\n"
-                    "`1` - В определённое время (ежедневно)\n"
-                    "`2` - Простой интервал\n"
-                    "`3` - Старт в указанное время + интервал\n\n"
-                    "Отправьте 1, 2 или 3:",
-                    parse_mode="Markdown"
-                )
-            elif action == "status":
-                b = db.get_broadcast(broadcast_id)
-                if b:
-                    new_status = not b['is_active']
-                    await update_broadcast_and_reload(broadcast_id, is_active=new_status)
-                    await call.message.answer(f"🔄 Рассылка {'включена ✅' if new_status else 'отключена ⛔'}")
-                    await show_broadcasts(call.message)
-            elif action == "delete":
-                b = db.get_broadcast(broadcast_id)
-                if b:
-                    if scheduler.get_job(f"broadcast_{broadcast_id}"):
-                        scheduler.remove_job(f"broadcast_{broadcast_id}")
-                    db.delete_broadcast(broadcast_id)
-                    await call.message.answer(f"🗑 Рассылка **{b['name']}** удалена", parse_mode="Markdown")
-                    await show_broadcasts(call.message)
-    
-    # Выбор группы для создания рассылки
-    elif data.startswith("select_group_"):
-        gid = int(data.split("_")[2])
-        group = db.get_target_group(gid)
-        if group:
-            admin_states[call.from_user.id] = {
-                "step": "name",
-                "group_id": gid,
-                "group_name": group['name']
-            }
-            await call.message.answer(f"📝 Создание рассылки для **{group['name']}**\n\nВведите название:", parse_mode="Markdown")
-    
-    # Просмотр рассылок группы
-    elif data.startswith("group_show_"):
-        gid = int(data.split("_")[2])
-        await show_group_broadcasts(call.message, gid)
-    
-    # Просмотр/редактирование конкретной рассылки из списка
-    elif data.startswith("broadcast_show_"):
-        bid = int(data.split("_")[2])
-        await show_broadcast_edit_menu(call.message, bid)
-    
-    # Включение/выключение рассылки
-    elif data.startswith("broadcast_toggle_"):
-        bid = int(data.split("_")[2])
-        b = db.get_broadcast(bid)
-        if b:
-            new_status = not b['is_active']
-            await update_broadcast_and_reload(bid, is_active=new_status)
-            await call.message.answer(f"🔄 Рассылка {b['name']}: {'включена ✅' if new_status else 'отключена ⛔'}")
-            await show_broadcasts(call.message)
-    
-    # Удаление рассылки
-    elif data.startswith("broadcast_delete_"):
-        bid = int(data.split("_")[2])
-        b = db.get_broadcast(bid)
-        if b:
-            if scheduler.get_job(f"broadcast_{bid}"):
-                scheduler.remove_job(f"broadcast_{bid}")
-            db.delete_broadcast(bid)
-            await call.message.answer(f"🗑 Рассылка {b['name']} удалена")
-            await show_broadcasts(call.message)
-    
-    # Управление группами
-    elif data.startswith("group_toggle_"):
-        gid = int(data.split("_")[2])
-        group = db.get_target_group(gid)
-        if group:
-            new_status = not group['is_active']
-            db.toggle_target_group(gid, 1 if new_status else 0)
-            for b in db.get_all_broadcasts(gid):
-                if new_status:
-                    await update_broadcast_and_reload(b['id'], is_active=True)
-                else:
-                    if scheduler.get_job(f"broadcast_{b['id']}"):
-                        scheduler.remove_job(f"broadcast_{b['id']}")
-            await call.message.answer(f"🔄 Группа {group['name']}: {'включена ✅' if new_status else 'отключена ⛔'}")
-            await show_groups(call.message)
-    
-    elif data.startswith("group_delete_"):
-        gid = int(data.split("_")[2])
-        group = db.get_target_group(gid)
-        if group:
-            for b in db.get_all_broadcasts(gid):
-                if scheduler.get_job(f"broadcast_{b['id']}"):
-                    scheduler.remove_job(f"broadcast_{b['id']}")
-            db.delete_target_group(gid)
-            await call.message.answer(f"🗑 Группа {group['name']} удалена")
-            await show_groups(call.message)
-    
-    # Статистика кнопок
-    elif data.startswith("stats_"):
-        bid = int(data.split("_")[1])
-        await show_broadcast_stats(call.message, bid)
-    
-    # Топ для конкретной рассылки
-    elif data.startswith("top_"):
-        bid = int(data.split("_")[1])
-        await show_broadcast_top(call.message, bid)
-    
-    elif data.startswith("top_group_"):
-        group_id = int(data.split("_")[2])
-        await show_group_top(call.message, group_id)
-
 # ==================== ОТОБРАЖЕНИЕ МЕНЮ ====================
 async def show_groups(message):
     groups = db.get_all_target_groups()
@@ -1064,6 +892,7 @@ async def show_group_broadcasts(message, group_id):
         return
     broadcasts = db.get_all_broadcasts(group_id)
     text = f"📋 **Рассылки группы:** {group['name']}\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
     if not broadcasts:
         text += "Нет рассылок"
@@ -1073,10 +902,6 @@ async def show_group_broadcasts(message, group_id):
             schedule_info = get_schedule_info(b)
             btn = f" 🔘 {b['button_text']}" if b.get('button_text') else ""
             text += f"{status} **{b['name']}**{btn}\n   ⏰ {schedule_info}\n\n"
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
-                InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
-            ])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать рассылку", callback_data=f"select_group_{group_id}")],
@@ -1090,19 +915,33 @@ async def show_broadcasts(message):
         await message.edit_text("📭 **Нет рассылок**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
     
+    # Группируем рассылки по группам
+    broadcasts_by_group = {}
+    for b in all_b:
+        group_id = b['group_id']
+        if group_id not in broadcasts_by_group:
+            broadcasts_by_group[group_id] = []
+        broadcasts_by_group[group_id].append(b)
+    
     text = "📋 **Все рассылки**\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
-    for b in all_b:
-        group = db.get_target_group(b['group_id'])
-        gname = group['name'] if group else "?"
-        status = "✅" if b['is_active'] else "⛔"
-        btn = f" [{b['button_text']}]" if b.get('button_text') else ""
-        text += f"{status} **{b['name']}**{btn} → {gname}\n"
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
-        ])
+    # Сортируем группы и выводим рассылки по группам
+    for group_id, broadcasts in broadcasts_by_group.items():
+        group = db.get_target_group(group_id)
+        group_name = group['name'] if group else f"Группа {group_id}"
+        
+        text += f"📢 **{group_name}**\n"
+        
+        for b in broadcasts:
+            status = "✅" if b['is_active'] else "⛔"
+            btn = f" [{b['button_text']}]" if b.get('button_text') else ""
+            text += f"   {status} **{b['name']}**{btn}\n"
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
+            ])
+        text += "\n"
     
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -1695,7 +1534,6 @@ async def save_broadcast(message, state):
         edit_message=state.get("edit_message")
     )
     
-    # Добавляем задачу в планировщик
     await update_broadcast_and_reload(broadcast_id, is_active=True)
     
     group = db.get_target_group(state["group_id"])
@@ -1722,14 +1560,18 @@ async def save_broadcast(message, state):
             interval_str = f"каждые {minutes}мин"
         schedule_info = f"🚀 старт {state['start_hour']:02d}:{state['start_minute']:02d}, затем {interval_str}"
     
+    # Отправляем сообщение с кнопкой возврата в админ-панель
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Вернуться в админ-панель", callback_data="back_to_main")]
+    ])
+    
     await message.answer(
         f"✅ **Рассылка создана!**\n\n"
         f"📢 Название: {state['name']}\n"
         f"📬 Группа: {group['name']}\n"
         f"{schedule_info}{btn_info}\n\n"
-        f"✏️ Теперь вы можете редактировать рассылку через меню 'Все рассылки'\n"
-        f"🔍 Команда `/debug` — диагностика\n"
-        f"💾 БД сохранена в: {DB_PATH}",
+        f"✏️ Редактировать рассылку можно через меню 'Все рассылки'",
+        reply_markup=keyboard,
         parse_mode="Markdown"
     )
     
