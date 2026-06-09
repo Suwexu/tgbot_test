@@ -37,7 +37,6 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 admin_states = {}
 
 # ==================== НАСТРОЙКА ПУТИ К БАЗЕ ДАННЫХ ====================
-# Проверяем, существует ли директория volume
 VOLUME_PATH = '/app/data'
 if os.path.exists(VOLUME_PATH) and os.path.isdir(VOLUME_PATH):
     DB_PATH = os.path.join(VOLUME_PATH, 'bot_database.db')
@@ -51,7 +50,6 @@ import sqlite3
 
 class Database:
     def __init__(self):
-        # Создаём директорию для Volume, если её нет
         db_dir = os.path.dirname(DB_PATH)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
@@ -320,15 +318,12 @@ db = Database()
 
 # ==================== ФУНКЦИИ ПРОВЕРКИ ПРАВ ====================
 def is_admin(user_id):
-    """Проверяет, является ли пользователь администратором бота"""
     return user_id in ADMIN_IDS
 
 def can_view_top(user_id):
-    """Проверяет, может ли пользователь смотреть топ (админ или в списке TOP_VIEWERS)"""
     return user_id in ADMIN_IDS or user_id in TOP_VIEWERS
 
 async def send_to_admin(text):
-    """Отправляет сообщение всем администраторам"""
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, text, parse_mode="Markdown")
@@ -526,7 +521,6 @@ async def handle_button_click(call: CallbackQuery):
 
 # ==================== КОМАНДЫ ====================
 
-# Команда /start - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_admin(message.from_user.id):
@@ -548,15 +542,13 @@ async def cmd_start(message: Message):
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
             f"👨‍💻 Администраторы управляют через /admin\n\n"
             f"📊 Команда `/top` — список времени реакции сотрудников\n"
+            f"💾 Команды бэкапа: `/backup` и `/restore`\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
 
-# Команда /top - доступна только администраторам и указанным в TOP_VIEWERS
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
-    """Список времени реакции сотрудников"""
-    
     if not can_view_top(message.from_user.id):
         await message.answer(
             "⛔ **У вас нет доступа к команде `/top`.**\n\n"
@@ -628,7 +620,6 @@ async def cmd_top(message: Message):
     
     await message.answer(text, parse_mode="Markdown")
 
-# Команда /admin - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
@@ -642,7 +633,6 @@ async def cmd_admin(message: Message):
     
     await message.answer("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
 
-# Команда /id - доступна всем
 @dp.message(Command("id"))
 async def cmd_id(message: Message):
     user_id = message.from_user.id
@@ -658,7 +648,6 @@ async def cmd_id(message: Message):
         parse_mode="Markdown"
     )
 
-# Команда /debug - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     if not is_admin(message.from_user.id):
@@ -702,7 +691,6 @@ async def cmd_debug(message: Message):
     
     await message.answer(text, parse_mode="Markdown")
 
-# Команда /backup - создать бэкап базы данных
 @dp.message(Command("backup"))
 async def cmd_backup(message: Message):
     """Создать бэкап базы данных (только для админов)"""
@@ -711,11 +699,10 @@ async def cmd_backup(message: Message):
         return
     
     try:
-        # Отправляем файл БД
         with open(DB_PATH, 'rb') as f:
             await bot.send_document(
                 message.chat.id, 
-                types.BufferedInputFile(f.read(), filename='bot_database_backup.db'),
+                types.BufferedInputFile(f.read(), filename=f'bot_database_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'),
                 caption=f"📦 Бэкап базы данных от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n💾 Путь: {DB_PATH}"
             )
         await message.answer("✅ Бэкап базы данных создан и отправлен!")
@@ -724,7 +711,52 @@ async def cmd_backup(message: Message):
         await message.answer(f"❌ Ошибка: {e}")
         logger.error(f"Ошибка создания бэкапа: {e}")
 
-# Команда /add_viewer - добавить наблюдателя (только для админов)
+@dp.message(Command("restore"))
+async def cmd_restore(message: Message):
+    """Восстановить базу данных из присланного бэкапа (только для админов)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа")
+        return
+    
+    # Проверяем, есть ли файл в ответе
+    if not message.reply_to_message or not message.reply_to_message.document:
+        await message.answer(
+            "📦 **Как восстановить бэкап:**\n\n"
+            "1. Отправьте файл бэкапа боту\n"
+            "2. Ответьте на это сообщение командой `/restore`\n\n"
+            "Или отправьте файл с подписью: `/restore`\n\n"
+            "⚠️ **ВНИМАНИЕ!** Текущая база данных будет заменена!\n"
+            "Рекомендуется сначала сделать `/backup`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        # Получаем файл
+        file_id = message.reply_to_message.document.file_id
+        file = await bot.get_file(file_id)
+        
+        # Скачиваем файл
+        downloaded_file = await bot.download_file(file.file_path)
+        
+        # Сохраняем как новую БД
+        with open(DB_PATH, 'wb') as f:
+            f.write(downloaded_file.getvalue())
+        
+        await message.answer(
+            f"✅ **База данных восстановлена!**\n\n"
+            f"💾 Путь: {DB_PATH}\n"
+            f"📊 Размер: {os.path.getsize(DB_PATH)} байт\n\n"
+            f"🔄 **Для применения изменений перезапустите бота!**\n"
+            f"(Нажмите Restart или Redeploy в Railway)",
+            parse_mode="Markdown"
+        )
+        logger.info(f"📦 БД восстановлена из бэкапа админом {message.from_user.id}")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка восстановления: {e}")
+        logger.error(f"Ошибка восстановления бэкапа: {e}")
+
 @dp.message(Command("add_viewer"))
 async def cmd_add_viewer(message: Message):
     if not is_admin(message.from_user.id):
@@ -1440,10 +1472,8 @@ async def main():
     logger.info(f"👁 Наблюдатели (/top): {TOP_VIEWERS}")
     logger.info(f"💾 Путь к базе данных: {DB_PATH}")
     
-    # Проверяем доступность Volume
     if os.path.exists(VOLUME_PATH):
         logger.info(f"✅ Volume найден по пути: {VOLUME_PATH}")
-        # Проверяем права на запись
         if os.access(VOLUME_PATH, os.W_OK):
             logger.info(f"✅ Есть права на запись в Volume")
         else:
@@ -1456,7 +1486,7 @@ async def main():
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
     
-    await send_to_admin(f"✅ **Бот запущен!**\n💾 База данных: {DB_PATH}\n🔍 /debug — диагностика")
+    await send_to_admin(f"✅ **Бот запущен!**\n💾 База данных: {DB_PATH}\n🔍 /debug — диагностика\n💾 /backup — бэкап БД\n📦 /restore — восстановление БД")
     
     await dp.start_polling(bot)
 
