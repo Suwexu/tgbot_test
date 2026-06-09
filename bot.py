@@ -209,7 +209,6 @@ class Database:
         cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE broadcast_id = ?', (broadcast_id,))
         return cursor.fetchone()[0]
     
-    # Методы для общего топа по всем рассылкам
     def get_top_fastest_all(self, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -248,7 +247,6 @@ class Database:
         cursor.execute('SELECT COUNT(DISTINCT user_id) FROM button_clicks WHERE reaction_time IS NOT NULL')
         return cursor.fetchone()[0]
     
-    # Методы для топа по конкретной группе
     def get_top_fastest_by_group(self, group_id, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -299,7 +297,6 @@ class Database:
         ''', (group_id,))
         return cursor.fetchone()[0]
     
-    # Методы для топа по конкретной рассылке
     def get_top_fastest(self, broadcast_id, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -372,12 +369,24 @@ def get_main_menu():
 
 # ==================== ОТПРАВКА РАССЫЛКИ ====================
 async def send_broadcast(broadcast_id):
-    logger.info(f"🚀 Запуск рассылки #{broadcast_id}")
+    logger.info(f"🚀 ЗАПУСК РАССЫЛКИ #{broadcast_id} в {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
     b = db.get_broadcast(broadcast_id)
-    if not b or not b['is_active']:
+    if not b:
+        logger.error(f"❌ Рассылка #{broadcast_id} не найдена в БД")
         return
+    
+    if not b['is_active']:
+        logger.info(f"⏸ Рассылка #{broadcast_id} отключена")
+        return
+    
     group = db.get_target_group(b['group_id'])
-    if not group or not group['is_active']:
+    if not group:
+        logger.error(f"❌ Группа для рассылки #{broadcast_id} не найдена")
+        return
+    
+    if not group['is_active']:
+        logger.info(f"⏸ Группа {group['name']} отключена")
         return
     
     try:
@@ -397,103 +406,66 @@ async def send_broadcast(broadcast_id):
         cursor.execute('UPDATE broadcasts SET last_sent_at = ? WHERE id = ?', (sent_at.isoformat(), broadcast_id))
         db.conn.commit()
         
-        logger.info(f"✅ Отправлено в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
+        logger.info(f"✅ Рассылка #{broadcast_id} ОТПРАВЛЕНА в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
         
+        # Отправляем уведомление админу
+        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}\n🕐 {sent_at.strftime('%H:%M:%S')}")
+        
+        # Для типа start_at_interval — перепланируем
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
+            logger.info(f"🔄 Рассылка #{broadcast_id} перепланирована: следующая через {b['interval_minutes']} мин")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-
-# ==================== ОБРАБОТЧИК НАЖАТИЙ КНОПОК ====================
-@dp.callback_query(lambda c: c.data and c.data.startswith("btn_"))
-async def handle_button_click(call: CallbackQuery):
-    broadcast_id = int(call.data.split("_")[1])
-    user = call.from_user
-    broadcast = db.get_broadcast(broadcast_id)
-    
-    if not broadcast:
-        await call.answer("❌ Рассылка не найдена", show_alert=True)
-        return
-    
-    button_text = broadcast['button_text']
-    edit_template = broadcast.get('edit_message') or "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
-    
-    click_time = datetime.now(pytz.timezone(TIMEZONE))
-    
-    reaction_time = None
-    sent_at_str = broadcast.get('last_sent_at')
-    if sent_at_str:
-        try:
-            sent_at = datetime.fromisoformat(sent_at_str)
-            if sent_at.tzinfo is None:
-                sent_at = pytz.timezone(TIMEZONE).localize(sent_at)
-            reaction_time = (click_time - sent_at).total_seconds()
-        except:
-            pass
-    
-    db.save_click(
-        broadcast_id=broadcast_id,
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        button_text=button_text,
-        reaction_time=reaction_time,
-        sent_at=sent_at_str
-    )
-    
-    mention = get_user_mention(user)
-    user_name = user.first_name or user.username or str(user.id)
-    time_str = click_time.strftime('%d.%m.%Y %H:%M:%S')
-    reaction_str = format_time(reaction_time) if reaction_time else "неизвестно"
-    
-    edit_text = edit_template.format(
-        mention=mention,
-        name=user_name,
-        user_id=user.id,
-        username=user.username or "нет",
-        time=time_str,
-        reaction=reaction_str,
-        button=button_text
-    )
-    
-    try:
-        await call.message.edit_text(edit_text, parse_mode="HTML")
-        await call.answer(f"✅ Ваш голос учтён! Время реакции: {reaction_str}", show_alert=False)
-    except Exception as e:
-        logger.error(f"Ошибка редактирования: {e}")
-        await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
-    
-    await send_to_admin(
-        f"🔘 **Нажатие на кнопку!**\n\n"
-        f"📢 Рассылка: {broadcast['name']}\n"
-        f"👤 Пользователь: {user.first_name} (@{user.username or 'нет'})\n"
-        f"🆔 ID: `{user.id}`\n"
-        f"🔘 Кнопка: {button_text}\n"
-        f"⚡ Время реакции: {reaction_str}\n"
-        f"🕐 Время нажатия: {time_str}"
-    )
-    
-    logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}, реакция: {reaction_str}")
+        logger.error(f"❌ ОШИБКА отправки рассылки #{broadcast_id}: {e}")
+        await send_to_admin(f"❌ **Ошибка рассылки!**\n📢 {b['name']}\n❌ {str(e)[:200]}")
 
 # ==================== ЗАГРУЗКА РАССЫЛОК ====================
 async def load_broadcasts():
-    for b in db.get_all_broadcasts():
+    logger.info("📋 Загрузка рассылок из БД...")
+    broadcasts = db.get_all_broadcasts()
+    logger.info(f"📋 Найдено рассылок в БД: {len(broadcasts)}")
+    
+    loaded_count = 0
+    for b in broadcasts:
         if not b['is_active']:
+            logger.info(f"⏸ Рассылка #{b['id']} '{b['name']}' неактивна, пропускаем")
             continue
+        
         job_id = f"broadcast_{b['id']}"
+        
         if b['schedule_type'] == 'fixed' and b['hour'] is not None:
-            scheduler.add_job(send_broadcast, CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE), args=[b['id']], id=job_id)
-            logger.info(f"📅 Загружена fixed: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
+            trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
+            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+            logger.info(f"📅 ЗАГРУЖЕНА fixed-рассылка #{b['id']}: '{b['name']}' в {b['hour']:02d}:{b['minute']:02d} ({TIMEZONE})")
+            loaded_count += 1
+            
         elif b['schedule_type'] == 'interval' and b['interval_minutes']:
-            scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[b['id']], id=job_id)
-            logger.info(f"⏱ Загружена interval: {b['name']} каждые {b['interval_minutes']} мин")
+            trigger = IntervalTrigger(minutes=b['interval_minutes'])
+            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+            mins = b['interval_minutes']
+            h = mins // 60
+            m = mins % 60
+            schedule_text = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
+            logger.info(f"⏱ ЗАГРУЖЕНА interval-рассылка #{b['id']}: '{b['name']}' {schedule_text}")
+            loaded_count += 1
+            
         elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
-            scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[b['id']], id=job_id)
-            logger.info(f"🚀 Загружена start_at_interval: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
+            trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+            logger.info(f"🚀 ЗАГРУЖЕНА start_at_interval-рассылка #{b['id']}: '{b['name']}' старт {b['start_hour']:02d}:{b['start_minute']:02d} ({TIMEZONE})")
+            loaded_count += 1
+    
+    logger.info(f"✅ Загружено активных рассылок в планировщик: {loaded_count}")
+    
+    # Выводим все задачи в планировщике
+    jobs = scheduler.get_jobs()
+    logger.info(f"📋 Всего задач в планировщике: {len(jobs)}")
+    for job in jobs:
+        logger.info(f"   • {job.id} -> next: {job.next_run_time}")
 
 # ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
@@ -511,7 +483,8 @@ async def cmd_start(message: Message):
             f"✅ **Бот для рассылок с кнопками!**\n\n"
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
             f"👨‍💻 Затем напиши /admin в личные сообщения\n\n"
-            f"📊 Команда `/top` в группе — показать статистику реакции сотрудников\n\n"
+            f"📊 Команда `/top` в группе — показать статистику реакции сотрудников\n"
+            f"🔍 Команда `/debug` — диагностика (только для админа)\n\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
@@ -532,6 +505,61 @@ async def cmd_admin(message: Message):
 @dp.message(Command("id"))
 async def cmd_id(message: Message):
     await message.answer(f"🆔 ID чата: `{message.chat.id}`", parse_mode="Markdown")
+
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Диагностическая команда для проверки статуса бота"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа")
+        return
+    
+    broadcasts = db.get_all_broadcasts()
+    jobs = scheduler.get_jobs()
+    
+    text = "🔍 **ДИАГНОСТИКА БОТА**\n\n"
+    text += f"🕐 Часовой пояс: `{TIMEZONE}`\n"
+    text += f"📅 Текущее время: `{datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+    
+    text += f"📋 **Рассылок в БД:** {len(broadcasts)}\n"
+    text += f"⏰ **Задач в планировщике:** {len(jobs)}\n\n"
+    
+    if broadcasts:
+        text += "**📋 СПИСОК РАССЫЛОК В БД:**\n"
+        for b in broadcasts:
+            status = "✅" if b['is_active'] else "⛔"
+            if b['schedule_type'] == 'fixed':
+                schedule = f"{b['hour']:02d}:{b['minute']:02d} ежедневно"
+            elif b['schedule_type'] == 'interval':
+                mins = b['interval_minutes']
+                h = mins // 60
+                m = mins % 60
+                schedule = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
+            else:
+                schedule = f"старт {b['start_hour']:02d}:{b['start_minute']:02d}, затем каждые {b['interval_minutes']} мин"
+            
+            btn = f" 🔘{b['button_text']}" if b.get('button_text') else ""
+            text += f"{status} ID:{b['id']} **{b['name']}**{btn}\n   ⏰ {schedule}\n"
+    
+    if jobs:
+        text += "\n**⏰ ЗАДАЧИ В ПЛАНИРОВЩИКЕ:**\n"
+        for job in jobs:
+            next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else "None"
+            text += f"• `{job.id}` -> next: {next_run}\n"
+    else:
+        text += "\n⚠️ **В планировщике НЕТ задач!**\n"
+        text += "Возможные причины:\n"
+        text += "• Нет активных рассылок\n"
+        text += "• Рассылки не загрузились при старте\n"
+        text += "• Ошибка в коде загрузки\n"
+    
+    # Проверяем группы
+    groups = db.get_all_target_groups()
+    text += f"\n**📢 ГРУППЫ В БД:** {len(groups)}\n"
+    for g in groups:
+        status = "✅" if g['is_active'] else "⛔"
+        text += f"{status} {g['name']} (ID: `{g['chat_id']}`)\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
@@ -1229,10 +1257,13 @@ async def save_broadcast(message, state):
     
     if b['schedule_type'] == 'fixed' and b['hour']:
         scheduler.add_job(send_broadcast, CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE), args=[broadcast_id], id=job_id)
+        logger.info(f"📅 Добавлена fixed-рассылка #{broadcast_id}: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
     elif b['schedule_type'] == 'interval' and b['interval_minutes']:
         scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
+        logger.info(f"⏱ Добавлена interval-рассылка #{broadcast_id}: {b['name']} каждые {b['interval_minutes']} мин")
     elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
         scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[broadcast_id], id=job_id)
+        logger.info(f"🚀 Добавлена start_at_interval-рассылка #{broadcast_id}: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
     
     group = db.get_target_group(state["group_id"])
     
@@ -1247,7 +1278,8 @@ async def save_broadcast(message, state):
         f"   • Замеряется время реакции\n"
         f"   • Сообщение заменяется на указанный текст с упоминанием\n"
         f"   • Ведётся статистика средней скорости\n\n"
-        f"📊 Команда `/top` в группе — показать статистику",
+        f"📊 Команда `/top` в группе — показать статистику\n"
+        f"🔍 Команда `/debug` — диагностика",
         parse_mode="Markdown"
     )
     
@@ -1262,7 +1294,7 @@ async def save_broadcast(message, state):
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
-    logger.info("🚀 Бот запускается...")
+    logger.info("🚀 БОТ ЗАПУСКАЕТСЯ...")
     logger.info(f"📅 Часовой пояс: {TIMEZONE}")
     logger.info(f"👑 Админ ID: {ADMIN_ID}")
     logger.info(f"📢 Админская группа: {ADMIN_GROUP_ID if ADMIN_GROUP_ID else 'Не настроена'}")
@@ -1270,10 +1302,16 @@ async def main():
     await load_broadcasts()
     scheduler.start()
     
-    logger.info("✅ Бот готов к работе!")
+    logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
+    
+    # Выводим список всех задач
+    jobs = scheduler.get_jobs()
+    logger.info(f"📋 Всего задач в планировщике после запуска: {len(jobs)}")
+    for job in jobs:
+        logger.info(f"   • {job.id} -> next: {job.next_run_time}")
     
     if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников")
+        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников\n🔍 Команда `/debug` — диагностика")
     
     await dp.start_polling(bot)
 
