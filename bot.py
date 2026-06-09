@@ -12,14 +12,19 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_IDS_STR = os.getenv("ADMIN_ID", "0")
+TOP_VIEWERS_STR = os.getenv("TOP_VIEWERS", "")
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
+
+# Преобразуем строки в списки чисел
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
+TOP_VIEWERS = [int(x.strip()) for x in TOP_VIEWERS_STR.split(",") if x.strip().isdigit()] if TOP_VIEWERS_STR else []
 
 if ADMIN_GROUP_ID:
     ADMIN_GROUP_ID = int(ADMIN_GROUP_ID)
 
-if not BOT_TOKEN or not ADMIN_ID:
+if not BOT_TOKEN or not ADMIN_IDS:
     raise ValueError("BOT_TOKEN и ADMIN_ID обязательны")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,6 +86,7 @@ class Database:
             )
         ''')
         self.conn.commit()
+        logger.info("✅ База данных инициализирована")
     
     def add_target_group(self, chat_id, name):
         cursor = self.conn.cursor()
@@ -226,27 +232,6 @@ class Database:
         ''', (limit,))
         return cursor.fetchall()
     
-    def get_user_stats_all(self, user_id):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT 
-                ROUND(AVG(reaction_time), 2) as avg_time,
-                COUNT(*) as clicks_count
-            FROM button_clicks
-            WHERE user_id = ? AND reaction_time IS NOT NULL
-        ''', (user_id,))
-        return cursor.fetchone()
-    
-    def get_total_clicks_all(self):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE reaction_time IS NOT NULL')
-        return cursor.fetchone()[0]
-    
-    def get_total_users_all(self):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(DISTINCT user_id) FROM button_clicks WHERE reaction_time IS NOT NULL')
-        return cursor.fetchone()[0]
-    
     def get_top_fastest_by_group(self, group_id, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -313,28 +298,23 @@ class Database:
             LIMIT ?
         ''', (broadcast_id, limit))
         return cursor.fetchall()
-    
-    def get_user_stats(self, broadcast_id, user_id):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT 
-                ROUND(AVG(reaction_time), 2) as avg_time,
-                COUNT(*) as clicks_count
-            FROM button_clicks
-            WHERE broadcast_id = ? AND user_id = ? AND reaction_time IS NOT NULL
-        ''', (broadcast_id, user_id))
-        return cursor.fetchone()
 
 db = Database()
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ФУНКЦИИ ПРОВЕРКИ ПРАВ ====================
 def is_admin(user_id):
-    return user_id == ADMIN_ID
+    """Проверяет, является ли пользователь администратором бота"""
+    return user_id in ADMIN_IDS
+
+def can_view_top(user_id):
+    """Проверяет, может ли пользователь смотреть топ (админ или в списке TOP_VIEWERS)"""
+    return user_id in ADMIN_IDS or user_id in TOP_VIEWERS
 
 async def send_to_admin(text):
-    if ADMIN_GROUP_ID:
+    """Отправляет сообщение всем администраторам"""
+    for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(ADMIN_GROUP_ID, text, parse_mode="Markdown")
+            await bot.send_message(admin_id, text, parse_mode="Markdown")
         except:
             pass
 
@@ -445,7 +425,6 @@ async def load_broadcasts():
                     if b['interval_minutes']:
                         trigger = IntervalTrigger(minutes=b['interval_minutes'])
                         scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-                        logger.info(f"🔄 Рассылка #{b['id']} будет повторяться каждые {b['interval_minutes']} мин")
                 else:
                     trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                     scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
@@ -529,13 +508,20 @@ async def handle_button_click(call: CallbackQuery):
     logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}, реакция: {reaction_str}")
 
 # ==================== КОМАНДЫ ====================
+
+# Команда /start - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Команда `/start` доступна только администраторам бота.", parse_mode="Markdown")
+        logger.warning(f"⚠️ Неавторизованная попытка доступа к /start от {message.from_user.id}")
+        return
+    
     if message.chat.type in ['group', 'supergroup']:
         chat_id = str(message.chat.id)
         if not db.get_target_group_by_chat_id(chat_id):
             db.add_target_group(chat_id, message.chat.title or f"Группа {chat_id}")
-            await message.answer("✅ Группа добавлена! Администратор может создавать рассылки.")
+            await message.answer("✅ Группа добавлена! Теперь администратор может создавать рассылки.")
             await send_to_admin(f"➕ Новая группа: {message.chat.title}\nID: `{chat_id}`")
         else:
             await message.answer("✅ Группа уже добавлена.")
@@ -543,34 +529,123 @@ async def cmd_start(message: Message):
         await message.answer(
             f"✅ **Бот для рассылок с кнопками!**\n\n"
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
-            f"👨‍💻 Затем напиши /admin\n\n"
-            f"🔍 Команда `/debug` — диагностика\n"
+            f"👨‍💻 Администраторы управляют через /admin\n\n"
+            f"📊 Команда `/top` — список времени реакции сотрудников\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
 
+# Команда /top - доступна только администраторам и указанным в TOP_VIEWERS
+@dp.message(Command("top"))
+async def cmd_top(message: Message):
+    """Список времени реакции сотрудников"""
+    
+    if not can_view_top(message.from_user.id):
+        await message.answer(
+            "⛔ **У вас нет доступа к команде `/top`.**\n\n"
+            "Эта команда доступна только администраторам и специально назначенным сотрудникам.",
+            parse_mode="Markdown"
+        )
+        logger.warning(f"⚠️ Неавторизованная попытка доступа к /top от {message.from_user.id}")
+        return
+    
+    if message.chat.type not in ['group', 'supergroup']:
+        await message.answer("📊 **Команда `/top` работает только в группах!**", parse_mode="Markdown")
+        return
+    
+    chat_id = str(message.chat.id)
+    group = db.get_target_group_by_chat_id(chat_id)
+    
+    if not group:
+        await message.answer(
+            "❌ **Группа не зарегистрирована в боте!**\n\n"
+            "Пожалуйста, попросите администратора зарегистрировать группу через команду `/start`.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if not group['is_active']:
+        await message.answer(
+            "⛔ **Группа отключена администратором**\n\n"
+            "Рассылки в эту группу временно не отправляются.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    top = db.get_top_fastest_by_group(group['id'], 20)
+    
+    if not top:
+        await message.answer(
+            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
+            f"Пока никто не нажимал на кнопки в рассылках этой группы.\n"
+            f"Дождитесь следующей рассылки с кнопкой.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    total_clicks = db.get_total_clicks_by_group(group['id'])
+    total_users = db.get_total_users_by_group(group['id'])
+    
+    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text += f"📢 Группа: **{group['name']}**\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(top):
+        user_id, username, first_name, avg_time, clicks_count = row
+        name = first_name or username or str(user_id)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        avg_str = format_time(avg_time)
+        if len(name) > 20:
+            name = name[:17] + "..."
+        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
+    
+    user_stats = db.get_user_stats_by_group(group['id'], message.from_user.id)
+    if user_stats and user_stats[1] > 0:
+        avg_time, clicks_count = user_stats
+        text += f"\n📊 **Ваша статистика:** {format_time(avg_time)} ({clicks_count} наж.)"
+    else:
+        text += f"\n📊 Вы ещё не нажимали на кнопки в этой группе."
+    
+    await message.answer(text, parse_mode="Markdown")
+
+# Команда /admin - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа к этой команде.")
+        await message.answer("⛔ У вас нет доступа к этой команде.", parse_mode="Markdown")
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /admin от {message.from_user.id}")
         return
     
     if ADMIN_GROUP_ID and message.chat.id != ADMIN_GROUP_ID and message.chat.type != 'private':
-        await message.answer(f"⛔ Управление доступно только в админской группе.\n📢 ID: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
+        await message.answer(f"⛔ Управление доступно только в админской группе или личных сообщениях.\n📢 ID админской группы: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
         return
     
     await message.answer("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
 
+# Команда /id - доступна всем
 @dp.message(Command("id"))
 async def cmd_id(message: Message):
-    await message.answer(f"🆔 ID чата: `{message.chat.id}`", parse_mode="Markdown")
+    user_id = message.from_user.id
+    is_admin_status = "✅ Да" if is_admin(user_id) else "❌ Нет"
+    can_view_top_status = "✅ Да" if can_view_top(user_id) else "❌ Нет"
+    
+    await message.answer(
+        f"🆔 **Информация**\n\n"
+        f"📝 Ваш ID: `{user_id}`\n"
+        f"👑 Администратор: {is_admin_status}\n"
+        f"📊 Доступ к /top: {can_view_top_status}\n\n"
+        f"🆔 ID чата: `{message.chat.id}`",
+        parse_mode="Markdown"
+    )
 
+# Команда /debug - ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
-    """Диагностика бота"""
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа")
+        await message.answer("⛔ Нет доступа. Команда `/debug` только для администраторов.", parse_mode="Markdown")
         return
     
     broadcasts = db.get_all_broadcasts()
@@ -609,54 +684,54 @@ async def cmd_debug(message: Message):
     
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(Command("top"))
-async def cmd_top(message: Message):
-    if message.chat.type not in ['group', 'supergroup']:
-        await message.answer("📊 **Команда `/top` работает только в группах!**", parse_mode="Markdown")
+# Команда /add_viewer - добавить наблюдателя (только для админов)
+@dp.message(Command("add_viewer"))
+async def cmd_add_viewer(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа")
         return
     
-    chat_id = str(message.chat.id)
-    group = db.get_target_group_by_chat_id(chat_id)
-    
-    if not group:
-        await message.answer("❌ **Группа не зарегистрирована!** Отправьте /start", parse_mode="Markdown")
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer(
+            "📝 **Как добавить наблюдателя:**\n\n"
+            "Отправьте: `/add_viewer 123456789`\n\n"
+            "Где 123456789 — Telegram ID пользователя, которому нужно дать доступ к `/top`.\n\n"
+            "💡 Узнать ID можно командой `/id` (пользователь должен отправить её боту).",
+            parse_mode="Markdown"
+        )
         return
     
-    if not group['is_active']:
-        await message.answer("⛔ **Группа отключена администратором**", parse_mode="Markdown")
-        return
-    
-    top = db.get_top_fastest_by_group(group['id'], 20)
-    
-    if not top:
-        await message.answer(f"📭 **Нет данных о реакции в группе {group['name']}**", parse_mode="Markdown")
-        return
-    
-    total_clicks = db.get_total_clicks_by_group(group['id'])
-    total_users = db.get_total_users_by_group(group['id'])
-    
-    text = f"📊 **Список времени реакции сотрудников**\n\n"
-    text += f"📢 Группа: **{group['name']}**\n"
-    text += f"👆 Всего нажатий: {total_clicks}\n"
-    text += f"👥 Участников: {total_users}\n\n"
-    text += "**Рейтинг (по средней скорости):**\n\n"
-    
-    medals = ["🥇", "🥈", "🥉"]
-    for i, row in enumerate(top):
-        user_id, username, first_name, avg_time, clicks_count = row
-        name = first_name or username or str(user_id)
-        medal = medals[i] if i < 3 else f"{i+1}."
-        avg_str = format_time(avg_time)
-        if len(name) > 20:
-            name = name[:17] + "..."
-        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
-    
-    user_stats = db.get_user_stats_by_group(group['id'], message.from_user.id)
-    if user_stats and user_stats[1] > 0:
-        avg_time, clicks_count = user_stats
-        text += f"\n📊 **Ваша статистика:** {format_time(avg_time)} ({clicks_count} наж.)"
-    
-    await message.answer(text, parse_mode="Markdown")
+    try:
+        new_viewer_id = int(args[1])
+        
+        if new_viewer_id in TOP_VIEWERS:
+            await message.answer(f"❌ Пользователь `{new_viewer_id}` уже имеет доступ к `/top`", parse_mode="Markdown")
+            return
+        
+        if new_viewer_id in ADMIN_IDS:
+            await message.answer(f"⚠️ Пользователь `{new_viewer_id}` уже является администратором, ему и так всё доступно.", parse_mode="Markdown")
+            return
+        
+        TOP_VIEWERS.append(new_viewer_id)
+        new_top_viewers_str = ",".join(str(x) for x in TOP_VIEWERS)
+        
+        await message.answer(
+            f"✅ **Пользователь добавлен в список наблюдателей!**\n\n"
+            f"🆔 ID: `{new_viewer_id}`\n\n"
+            f"⚠️ **Важно:** Для постоянного сохранения добавьте этот ID в переменную `TOP_VIEWERS` в Railway:\n"
+            f"`{new_top_viewers_str}`\n\n"
+            f"Пока ID не добавлен в переменные, после перезапуска бота доступ пропадёт.",
+            parse_mode="Markdown"
+        )
+        
+        try:
+            await bot.send_message(new_viewer_id, "✅ **Вам открыт доступ к команде `/top`!**\n\nТеперь вы можете просматривать статистику времени реакции сотрудников в группах.", parse_mode="Markdown")
+        except:
+            pass
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат ID. Используйте только цифры.")
 
 # ==================== CALLBACK ОБРАБОТЧИК ====================
 @dp.callback_query()
@@ -1320,15 +1395,15 @@ async def save_broadcast(message, state):
 async def main():
     logger.info("🚀 БОТ ЗАПУСКАЕТСЯ...")
     logger.info(f"📅 Часовой пояс: {TIMEZONE}")
-    logger.info(f"👑 Админ ID: {ADMIN_ID}")
+    logger.info(f"👑 Администраторы: {ADMIN_IDS}")
+    logger.info(f"👁 Наблюдатели (/top): {TOP_VIEWERS}")
     
     await load_broadcasts()
     scheduler.start()
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
     
-    if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот запущен!**\n🔍 /debug — диагностика")
+    await send_to_admin("✅ **Бот запущен!**\n🔍 /debug — диагностика")
     
     await dp.start_polling(bot)
 
