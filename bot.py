@@ -408,7 +408,6 @@ async def send_broadcast(broadcast_id):
         
         logger.info(f"✅ Рассылка #{broadcast_id} ОТПРАВЛЕНА в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
         
-        # Отправляем уведомление админу
         await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}\n🕐 {sent_at.strftime('%H:%M:%S')}")
         
         # Для типа start_at_interval — перепланируем
@@ -437,27 +436,52 @@ async def load_broadcasts():
         
         job_id = f"broadcast_{b['id']}"
         
-        if b['schedule_type'] == 'fixed' and b['hour'] is not None:
-            trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
-            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-            logger.info(f"📅 ЗАГРУЖЕНА fixed-рассылка #{b['id']}: '{b['name']}' в {b['hour']:02d}:{b['minute']:02d} ({TIMEZONE})")
-            loaded_count += 1
-            
-        elif b['schedule_type'] == 'interval' and b['interval_minutes']:
-            trigger = IntervalTrigger(minutes=b['interval_minutes'])
-            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-            mins = b['interval_minutes']
-            h = mins // 60
-            m = mins % 60
-            schedule_text = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
-            logger.info(f"⏱ ЗАГРУЖЕНА interval-рассылка #{b['id']}: '{b['name']}' {schedule_text}")
-            loaded_count += 1
-            
-        elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
-            trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
-            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-            logger.info(f"🚀 ЗАГРУЖЕНА start_at_interval-рассылка #{b['id']}: '{b['name']}' старт {b['start_hour']:02d}:{b['start_minute']:02d} ({TIMEZONE})")
-            loaded_count += 1
+        # Удаляем старую задачу, если есть
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+        
+        try:
+            if b['schedule_type'] == 'fixed' and b['hour'] is not None:
+                trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
+                scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                logger.info(f"📅 ЗАГРУЖЕНА fixed-рассылка #{b['id']}: '{b['name']}' в {b['hour']:02d}:{b['minute']:02d} ({TIMEZONE})")
+                loaded_count += 1
+                
+            elif b['schedule_type'] == 'interval' and b['interval_minutes']:
+                trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                mins = b['interval_minutes']
+                h = mins // 60
+                m = mins % 60
+                schedule_text = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
+                logger.info(f"⏱ ЗАГРУЖЕНА interval-рассылка #{b['id']}: '{b['name']}' {schedule_text}")
+                loaded_count += 1
+                
+            elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
+                tz = pytz.timezone(TIMEZONE)
+                now = datetime.now(tz)
+                start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+                
+                # Если время старта уже прошло сегодня, запускаем сразу + интервал
+                if start_time < now:
+                    logger.info(f"⚠️ Время старта рассылки #{b['id']} уже прошло сегодня, запускаем немедленно")
+                    # Запускаем немедленно
+                    asyncio.create_task(send_broadcast(b['id']))
+                    # Затем по интервалу
+                    if b['interval_minutes']:
+                        trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                        scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                        logger.info(f"🔄 Рассылка #{b['id']} будет повторяться каждые {b['interval_minutes']} мин")
+                        loaded_count += 1
+                else:
+                    # Первый запуск в указанное время
+                    trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                    scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                    logger.info(f"🚀 ЗАГРУЖЕНА start_at_interval-рассылка #{b['id']}: '{b['name']}' старт {b['start_hour']:02d}:{b['start_minute']:02d} ({TIMEZONE})")
+                    loaded_count += 1
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки рассылки #{b['id']}: {e}")
     
     logger.info(f"✅ Загружено активных рассылок в планировщик: {loaded_count}")
     
@@ -508,7 +532,6 @@ async def cmd_id(message: Message):
 
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
-    """Диагностическая команда для проверки статуса бота"""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
@@ -536,7 +559,6 @@ async def cmd_debug(message: Message):
                 schedule = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
             else:
                 schedule = f"старт {b['start_hour']:02d}:{b['start_minute']:02d}, затем каждые {b['interval_minutes']} мин"
-            
             btn = f" 🔘{b['button_text']}" if b.get('button_text') else ""
             text += f"{status} ID:{b['id']} **{b['name']}**{btn}\n   ⏰ {schedule}\n"
     
@@ -547,12 +569,7 @@ async def cmd_debug(message: Message):
             text += f"• `{job.id}` -> next: {next_run}\n"
     else:
         text += "\n⚠️ **В планировщике НЕТ задач!**\n"
-        text += "Возможные причины:\n"
-        text += "• Нет активных рассылок\n"
-        text += "• Рассылки не загрузились при старте\n"
-        text += "• Ошибка в коде загрузки\n"
     
-    # Проверяем группы
     groups = db.get_all_target_groups()
     text += f"\n**📢 ГРУППЫ В БД:** {len(groups)}\n"
     for g in groups:
@@ -563,8 +580,6 @@ async def cmd_debug(message: Message):
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
-    """Показать топ реакции сотрудников для текущей группы"""
-    
     if message.chat.type not in ['group', 'supergroup']:
         await message.answer(
             "📊 **Команда `/top` работает только в группах!**\n\n"
@@ -688,7 +703,18 @@ async def handle_callback(call: CallbackQuery):
                     elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                         scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[b['id']], id=job_id)
                     elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
-                        scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[b['id']], id=job_id)
+                        # Проверяем время
+                        tz = pytz.timezone(TIMEZONE)
+                        now = datetime.now(tz)
+                        start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+                        if start_time < now:
+                            asyncio.create_task(send_broadcast(b['id']))
+                            if b['interval_minutes']:
+                                trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                                scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                        else:
+                            trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                            scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                 else:
                     if scheduler.get_job(job_id):
                         scheduler.remove_job(job_id)
@@ -723,7 +749,17 @@ async def handle_callback(call: CallbackQuery):
                 elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                     scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[bid], id=job_id)
                 elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
-                    scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[bid], id=job_id)
+                    tz = pytz.timezone(TIMEZONE)
+                    now = datetime.now(tz)
+                    start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+                    if start_time < now:
+                        asyncio.create_task(send_broadcast(bid))
+                        if b['interval_minutes']:
+                            trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                            scheduler.add_job(send_broadcast, trigger, args=[bid], id=job_id)
+                    else:
+                        trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                        scheduler.add_job(send_broadcast, trigger, args=[bid], id=job_id)
             else:
                 if scheduler.get_job(job_id):
                     scheduler.remove_job(job_id)
@@ -1046,7 +1082,17 @@ async def toggle_all(message):
             elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                 scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[b['id']], id=job_id)
             elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
-                scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[b['id']], id=job_id)
+                tz = pytz.timezone(TIMEZONE)
+                now = datetime.now(tz)
+                start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+                if start_time < now:
+                    asyncio.create_task(send_broadcast(b['id']))
+                    if b['interval_minutes']:
+                        trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                        scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                else:
+                    trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                    scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
         else:
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
@@ -1255,15 +1301,36 @@ async def save_broadcast(message, state):
     b = db.get_broadcast(broadcast_id)
     job_id = f"broadcast_{broadcast_id}"
     
-    if b['schedule_type'] == 'fixed' and b['hour']:
-        scheduler.add_job(send_broadcast, CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE), args=[broadcast_id], id=job_id)
-        logger.info(f"📅 Добавлена fixed-рассылка #{broadcast_id}: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
-    elif b['schedule_type'] == 'interval' and b['interval_minutes']:
-        scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
-        logger.info(f"⏱ Добавлена interval-рассылка #{broadcast_id}: {b['name']} каждые {b['interval_minutes']} мин")
-    elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
-        scheduler.add_job(send_broadcast, CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE), args=[broadcast_id], id=job_id)
-        logger.info(f"🚀 Добавлена start_at_interval-рассылка #{broadcast_id}: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
+    try:
+        if b['schedule_type'] == 'fixed' and b['hour']:
+            trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
+            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+            logger.info(f"📅 Добавлена fixed-рассылка #{broadcast_id}: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
+            
+        elif b['schedule_type'] == 'interval' and b['interval_minutes']:
+            trigger = IntervalTrigger(minutes=b['interval_minutes'])
+            scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+            logger.info(f"⏱ Добавлена interval-рассылка #{broadcast_id}: {b['name']} каждые {b['interval_minutes']} мин")
+            
+        elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
+            tz = pytz.timezone(TIMEZONE)
+            now = datetime.now(tz)
+            start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+            
+            if start_time < now:
+                logger.info(f"⚠️ Время старта уже прошло, запускаем рассылку #{broadcast_id} немедленно")
+                asyncio.create_task(send_broadcast(broadcast_id))
+                if b['interval_minutes']:
+                    trigger = IntervalTrigger(minutes=b['interval_minutes'])
+                    scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+                    logger.info(f"🔄 Рассылка #{broadcast_id} будет повторяться каждые {b['interval_minutes']} мин")
+            else:
+                trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
+                scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+                logger.info(f"🚀 Добавлена start_at_interval-рассылка #{broadcast_id}: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления рассылки #{broadcast_id} в планировщик: {e}")
     
     group = db.get_target_group(state["group_id"])
     
@@ -1304,7 +1371,6 @@ async def main():
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
     
-    # Выводим список всех задач
     jobs = scheduler.get_jobs()
     logger.info(f"📋 Всего задач в планировщике после запуска: {len(jobs)}")
     for job in jobs:
