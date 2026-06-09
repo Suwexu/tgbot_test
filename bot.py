@@ -408,9 +408,8 @@ async def send_broadcast(broadcast_id):
         
         logger.info(f"✅ Рассылка #{broadcast_id} ОТПРАВЛЕНА в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
         
-        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}\n🕐 {sent_at.strftime('%H:%M:%S')}")
+        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}\n🕐 {sent_at.strftime('%H:%M')}")
         
-        # Для типа start_at_interval — перепланируем
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
@@ -436,7 +435,6 @@ async def load_broadcasts():
         
         job_id = f"broadcast_{b['id']}"
         
-        # Удаляем старую задачу, если есть
         if scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
         
@@ -462,19 +460,15 @@ async def load_broadcasts():
                 now = datetime.now(tz)
                 start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
                 
-                # Если время старта уже прошло сегодня, запускаем сразу + интервал
                 if start_time < now:
                     logger.info(f"⚠️ Время старта рассылки #{b['id']} уже прошло сегодня, запускаем немедленно")
-                    # Запускаем немедленно
                     asyncio.create_task(send_broadcast(b['id']))
-                    # Затем по интервалу
                     if b['interval_minutes']:
                         trigger = IntervalTrigger(minutes=b['interval_minutes'])
                         scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                         logger.info(f"🔄 Рассылка #{b['id']} будет повторяться каждые {b['interval_minutes']} мин")
                         loaded_count += 1
                 else:
-                    # Первый запуск в указанное время
                     trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                     scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                     logger.info(f"🚀 ЗАГРУЖЕНА start_at_interval-рассылка #{b['id']}: '{b['name']}' старт {b['start_hour']:02d}:{b['start_minute']:02d} ({TIMEZONE})")
@@ -485,11 +479,81 @@ async def load_broadcasts():
     
     logger.info(f"✅ Загружено активных рассылок в планировщик: {loaded_count}")
     
-    # Выводим все задачи в планировщике
     jobs = scheduler.get_jobs()
     logger.info(f"📋 Всего задач в планировщике: {len(jobs)}")
     for job in jobs:
         logger.info(f"   • {job.id} -> next: {job.next_run_time}")
+
+# ==================== ОБРАБОТЧИК НАЖАТИЙ КНОПОК ====================
+@dp.callback_query(lambda c: c.data and c.data.startswith("btn_"))
+async def handle_button_click(call: CallbackQuery):
+    broadcast_id = int(call.data.split("_")[1])
+    user = call.from_user
+    broadcast = db.get_broadcast(broadcast_id)
+    
+    if not broadcast:
+        await call.answer("❌ Рассылка не найдена", show_alert=True)
+        return
+    
+    button_text = broadcast['button_text']
+    edit_template = broadcast.get('edit_message') or "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
+    
+    click_time = datetime.now(pytz.timezone(TIMEZONE))
+    
+    reaction_time = None
+    sent_at_str = broadcast.get('last_sent_at')
+    if sent_at_str:
+        try:
+            sent_at = datetime.fromisoformat(sent_at_str)
+            if sent_at.tzinfo is None:
+                sent_at = pytz.timezone(TIMEZONE).localize(sent_at)
+            reaction_time = (click_time - sent_at).total_seconds()
+        except:
+            pass
+    
+    db.save_click(
+        broadcast_id=broadcast_id,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        button_text=button_text,
+        reaction_time=reaction_time,
+        sent_at=sent_at_str
+    )
+    
+    mention = get_user_mention(user)
+    user_name = user.first_name or user.username or str(user.id)
+    time_str = click_time.strftime('%H:%M')
+    reaction_str = format_time(reaction_time) if reaction_time else "неизвестно"
+    
+    edit_text = edit_template.format(
+        mention=mention,
+        name=user_name,
+        user_id=user.id,
+        username=user.username or "нет",
+        time=time_str,
+        reaction=reaction_str,
+        button=button_text
+    )
+    
+    try:
+        await call.message.edit_text(edit_text, parse_mode="HTML")
+        await call.answer(f"✅ Ваш голос учтён! Время реакции: {reaction_str}", show_alert=False)
+    except Exception as e:
+        logger.error(f"Ошибка редактирования: {e}")
+        await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
+    
+    await send_to_admin(
+        f"🔘 **Нажатие на кнопку!**\n\n"
+        f"📢 Рассылка: {broadcast['name']}\n"
+        f"👤 Пользователь: {user.first_name} (@{user.username or 'нет'})\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"🔘 Кнопка: {button_text}\n"
+        f"⚡ Время реакции: {reaction_str}\n"
+        f"🕐 Время нажатия: {time_str}"
+    )
+    
+    logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}, реакция: {reaction_str}")
 
 # ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
@@ -703,7 +767,6 @@ async def handle_callback(call: CallbackQuery):
                     elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                         scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[b['id']], id=job_id)
                     elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
-                        # Проверяем время
                         tz = pytz.timezone(TIMEZONE)
                         now = datetime.now(tz)
                         start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
@@ -1196,7 +1259,7 @@ async def handle_input(message: Message):
                 "`{name}` - имя пользователя\n"
                 "`{user_id}` - ID пользователя\n"
                 "`{username}` - username\n"
-                "`{time}` - время нажатия\n"
+                "`{time}` - время нажатия (только часы:минуты)\n"
                 "`{reaction}` - время реакции\n"
                 "`{button}` - текст кнопки\n\n"
                 "**Пример:**\n"
@@ -1344,6 +1407,7 @@ async def save_broadcast(message, state):
         f"📌 При нажатии на кнопку:\n"
         f"   • Замеряется время реакции\n"
         f"   • Сообщение заменяется на указанный текст с упоминанием\n"
+        f"   • Время отображается в формате ЧЧ:ММ\n"
         f"   • Ведётся статистика средней скорости\n\n"
         f"📊 Команда `/top` в группе — показать статистику\n"
         f"🔍 Команда `/debug` — диагностика",
@@ -1377,7 +1441,7 @@ async def main():
         logger.info(f"   • {job.id} -> next: {job.next_run_time}")
     
     if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников\n🔍 Команда `/debug` — диагностика")
+        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников\n🔍 Команда `/debug` — диагностика\n🕐 Время нажатия отображается в формате ЧЧ:ММ")
     
     await dp.start_polling(bot)
 
