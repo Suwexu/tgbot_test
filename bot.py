@@ -323,12 +323,11 @@ def is_admin(user_id):
 def can_view_top(user_id):
     return user_id in ADMIN_IDS or user_id in TOP_VIEWERS
 
-async def send_to_admin(text):
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, text, parse_mode="Markdown")
-        except:
-            pass
+def get_user_mention(user):
+    if user.username:
+        return f"@{user.username}"
+    else:
+        return f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
 def format_time(seconds):
     if seconds is None:
@@ -341,12 +340,6 @@ def format_time(seconds):
         mins = int(seconds // 60)
         secs = seconds % 60
         return f"{mins} мин {secs:.0f} сек"
-
-def get_user_mention(user):
-    if user.username:
-        return f"@{user.username}"
-    else:
-        return f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -389,13 +382,13 @@ async def send_broadcast(broadcast_id):
         db.conn.commit()
         
         logger.info(f"✅ Отправлено в {group['name']}")
-        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}")
         
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
+            logger.info(f"🔄 Рассылка #{broadcast_id} перепланирована: следующая через {b['interval_minutes']} мин")
             
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -437,6 +430,7 @@ async def load_broadcasts():
                     if b['interval_minutes']:
                         trigger = IntervalTrigger(minutes=b['interval_minutes'])
                         scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
+                        logger.info(f"🔄 Рассылка #{b['id']} будет повторяться каждые {b['interval_minutes']} мин")
                 else:
                     trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                     scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
@@ -507,17 +501,8 @@ async def handle_button_click(call: CallbackQuery):
         logger.error(f"Ошибка редактирования: {e}")
         await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
     
-    await send_to_admin(
-        f"🔘 **Нажатие на кнопку!**\n\n"
-        f"📢 Рассылка: {broadcast['name']}\n"
-        f"👤 Пользователь: {user.first_name} (@{user.username or 'нет'})\n"
-        f"🆔 ID: `{user.id}`\n"
-        f"🔘 Кнопка: {button_text}\n"
-        f"⚡ Время реакции: {reaction_str}\n"
-        f"🕐 Время нажатия: {time_str}"
-    )
-    
-    logger.info(f"🔘 Нажатие: {user.id} на рассылку #{broadcast_id}, реакция: {reaction_str}")
+    # Только лог, без отправки админу
+    logger.info(f"🔘 Нажатие: {user.id} ({user_name}) на рассылку #{broadcast_id}, реакция: {reaction_str}")
 
 # ==================== КОМАНДЫ ====================
 
@@ -533,7 +518,7 @@ async def cmd_start(message: Message):
         if not db.get_target_group_by_chat_id(chat_id):
             db.add_target_group(chat_id, message.chat.title or f"Группа {chat_id}")
             await message.answer("✅ Группа добавлена! Теперь администратор может создавать рассылки.")
-            await send_to_admin(f"➕ Новая группа: {message.chat.title}\nID: `{chat_id}`")
+            logger.info(f"➕ Новая группа: {message.chat.title} (ID: {chat_id})")
         else:
             await message.answer("✅ Группа уже добавлена.")
     else:
@@ -693,7 +678,6 @@ async def cmd_debug(message: Message):
 
 @dp.message(Command("backup"))
 async def cmd_backup(message: Message):
-    """Создать бэкап базы данных (только для админов)"""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
@@ -713,49 +697,37 @@ async def cmd_backup(message: Message):
 
 @dp.message(Command("restore"))
 async def cmd_restore(message: Message):
-    """Восстановить базу данных из присланного бэкапа (только для админов)"""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
     
-    # Проверяем, есть ли файл в ответе
     if not message.reply_to_message or not message.reply_to_message.document:
         await message.answer(
             "📦 **Как восстановить бэкап:**\n\n"
             "1. Отправьте файл бэкапа боту\n"
             "2. Ответьте на это сообщение командой `/restore`\n\n"
-            "Или отправьте файл с подписью: `/restore`\n\n"
-            "⚠️ **ВНИМАНИЕ!** Текущая база данных будет заменена!\n"
-            "Рекомендуется сначала сделать `/backup`",
+            "⚠️ **ВНИМАНИЕ!** Текущая база данных будет заменена!",
             parse_mode="Markdown"
         )
         return
     
     try:
-        # Получаем файл
         file_id = message.reply_to_message.document.file_id
         file = await bot.get_file(file_id)
-        
-        # Скачиваем файл
         downloaded_file = await bot.download_file(file.file_path)
         
-        # Сохраняем как новую БД
         with open(DB_PATH, 'wb') as f:
             f.write(downloaded_file.getvalue())
         
         await message.answer(
             f"✅ **База данных восстановлена!**\n\n"
             f"💾 Путь: {DB_PATH}\n"
-            f"📊 Размер: {os.path.getsize(DB_PATH)} байт\n\n"
-            f"🔄 **Для применения изменений перезапустите бота!**\n"
-            f"(Нажмите Restart или Redeploy в Railway)",
+            f"🔄 Перезапустите бота для применения изменений.",
             parse_mode="Markdown"
         )
         logger.info(f"📦 БД восстановлена из бэкапа админом {message.from_user.id}")
-        
     except Exception as e:
         await message.answer(f"❌ Ошибка восстановления: {e}")
-        logger.error(f"Ошибка восстановления бэкапа: {e}")
 
 @dp.message(Command("add_viewer"))
 async def cmd_add_viewer(message: Message):
@@ -768,8 +740,7 @@ async def cmd_add_viewer(message: Message):
         await message.answer(
             "📝 **Как добавить наблюдателя:**\n\n"
             "Отправьте: `/add_viewer 123456789`\n\n"
-            "Где 123456789 — Telegram ID пользователя, которому нужно дать доступ к `/top`.\n\n"
-            "💡 Узнать ID можно командой `/id` (пользователь должен отправить её боту).",
+            "Где 123456789 — Telegram ID пользователя.",
             parse_mode="Markdown"
         )
         return
@@ -778,32 +749,29 @@ async def cmd_add_viewer(message: Message):
         new_viewer_id = int(args[1])
         
         if new_viewer_id in TOP_VIEWERS:
-            await message.answer(f"❌ Пользователь `{new_viewer_id}` уже имеет доступ к `/top`", parse_mode="Markdown")
+            await message.answer(f"❌ Пользователь `{new_viewer_id}` уже имеет доступ", parse_mode="Markdown")
             return
         
         if new_viewer_id in ADMIN_IDS:
-            await message.answer(f"⚠️ Пользователь `{new_viewer_id}` уже является администратором, ему и так всё доступно.", parse_mode="Markdown")
+            await message.answer(f"⚠️ Пользователь уже является администратором", parse_mode="Markdown")
             return
         
         TOP_VIEWERS.append(new_viewer_id)
-        new_top_viewers_str = ",".join(str(x) for x in TOP_VIEWERS)
         
         await message.answer(
-            f"✅ **Пользователь добавлен в список наблюдателей!**\n\n"
+            f"✅ **Пользователь добавлен!**\n\n"
             f"🆔 ID: `{new_viewer_id}`\n\n"
-            f"⚠️ **Важно:** Для постоянного сохранения добавьте этот ID в переменную `TOP_VIEWERS` в Railway:\n"
-            f"`{new_top_viewers_str}`\n\n"
-            f"Пока ID не добавлен в переменные, после перезапуска бота доступ пропадёт.",
+            f"⚠️ Для постоянного сохранения добавьте ID в переменную `TOP_VIEWERS` в Railway.",
             parse_mode="Markdown"
         )
         
         try:
-            await bot.send_message(new_viewer_id, "✅ **Вам открыт доступ к команде `/top`!**\n\nТеперь вы можете просматривать статистику времени реакции сотрудников в группах.", parse_mode="Markdown")
+            await bot.send_message(new_viewer_id, "✅ **Вам открыт доступ к команде `/top`!**", parse_mode="Markdown")
         except:
             pass
             
     except ValueError:
-        await message.answer("❌ Неверный формат ID. Используйте только цифры.")
+        await message.answer("❌ Неверный формат ID.")
 
 # ==================== CALLBACK ОБРАБОТЧИК ====================
 @dp.callback_query()
@@ -1276,7 +1244,7 @@ async def handle_input(message: Message):
             else:
                 db.add_target_group(str(chat_id), f"Группа {chat_id}")
                 await message.answer(f"✅ Группа `{chat_id}` добавлена", parse_mode="Markdown")
-                await send_to_admin(f"➕ Добавлена группа вручную: `{chat_id}`")
+                logger.info(f"➕ Добавлена группа вручную: {chat_id}")
             del admin_states[message.from_user.id]
             await show_groups(message)
         except:
@@ -1332,9 +1300,9 @@ async def handle_input(message: Message):
         state["step"] = "schedule_type"
         await message.answer(
             "⏰ **Тип расписания**\n\n"
-            "`1` - В определённое время\n"
-            "`2` - Простой интервал\n"
-            "`3` - Старт + интервал\n\n"
+            "`1` - В определённое время (ежедневно)\n"
+            "`2` - Простой интервал (каждые X минут)\n"
+            "`3` - Старт в указанное время + интервал\n\n"
             "Отправьте 1, 2 или 3:",
             parse_mode="Markdown"
         )
@@ -1343,15 +1311,15 @@ async def handle_input(message: Message):
         if message.text == "1":
             state["schedule_type"] = "fixed"
             state["step"] = "fixed_time"
-            await message.answer(f"⏰ Введите время (ЧЧ:ММ), часовой пояс {TIMEZONE}", parse_mode="Markdown")
+            await message.answer(f"⏰ Введите время в формате `HH:MM` (часовой пояс {TIMEZONE})\n\nПример: `09:30` или `18:00`", parse_mode="Markdown")
         elif message.text == "2":
             state["schedule_type"] = "interval"
             state["step"] = "interval"
-            await message.answer("⏰ Введите интервал в минутах:")
+            await message.answer("⏰ Введите интервал в минутах:\n\nПример: `60` - каждый час, `30` - каждые 30 минут", parse_mode="Markdown")
         elif message.text == "3":
             state["schedule_type"] = "start_at_interval"
             state["step"] = "start_time"
-            await message.answer(f"🚀 Введите первое время (ЧЧ:ММ), часовой пояс {TIMEZONE}", parse_mode="Markdown")
+            await message.answer(f"🚀 Введите **первое время** отправки в формате `HH:MM` (часовой пояс {TIMEZONE})\n\nПример: `14:00` - первая рассылка в 14:00", parse_mode="Markdown")
         else:
             await message.answer("❌ Отправьте 1, 2 или 3")
     
@@ -1365,18 +1333,18 @@ async def handle_input(message: Message):
             else:
                 raise ValueError
         except:
-            await message.answer("❌ Неверный формат. Пример: 14:30")
+            await message.answer("❌ Неверный формат. Пример: `14:30`", parse_mode="Markdown")
     
     elif step == "interval":
         try:
-            interval = int(message.text)
+            interval = int(message.text.strip())
             if interval > 0:
                 state["interval_minutes"] = interval
                 await save_broadcast(message, state)
             else:
-                raise ValueError
-        except:
-            await message.answer("❌ Введите положительное число")
+                await message.answer("❌ Введите положительное число (больше 0).\n\nПример: `60` - каждый час", parse_mode="Markdown")
+        except ValueError:
+            await message.answer("❌ Неверный формат. Введите целое число.\n\nПример: `60` - каждый час", parse_mode="Markdown")
     
     elif step == "start_time":
         try:
@@ -1385,22 +1353,31 @@ async def handle_input(message: Message):
                 state["start_hour"] = h
                 state["start_minute"] = m
                 state["step"] = "interval_after_start"
-                await message.answer("⏰ Введите интервал повторения (минуты):")
+                await message.answer(
+                    "⏰ **Интервал повторения**\n\n"
+                    "Введите интервал в минутах (через сколько минут повторять после первого запуска):\n\n"
+                    "Примеры:\n"
+                    "`120` - каждые 2 часа\n"
+                    "`60` - каждый час\n"
+                    "`30` - каждые 30 минут\n\n"
+                    "Отправьте число:",
+                    parse_mode="Markdown"
+                )
             else:
                 raise ValueError
         except:
-            await message.answer("❌ Неверный формат. Пример: 14:30")
+            await message.answer("❌ Неверный формат времени. Пример: `14:30`", parse_mode="Markdown")
     
     elif step == "interval_after_start":
         try:
-            interval = int(message.text)
+            interval = int(message.text.strip())
             if interval > 0:
                 state["interval_minutes"] = interval
                 await save_broadcast(message, state)
             else:
-                raise ValueError
-        except:
-            await message.answer("❌ Введите положительное число")
+                await message.answer("❌ Введите положительное число (больше 0).\n\nПример: `120` - каждые 2 часа", parse_mode="Markdown")
+        except ValueError:
+            await message.answer("❌ Неверный формат. Введите целое число (минуты).\n\nПример: `120` - каждые 2 часа", parse_mode="Markdown")
 
 async def save_broadcast(message, state):
     broadcast_id = db.add_broadcast(
@@ -1424,43 +1401,68 @@ async def save_broadcast(message, state):
         if b['schedule_type'] == 'fixed' and b['hour']:
             trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
             scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+            logger.info(f"📅 Добавлена fixed-рассылка #{broadcast_id}: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
             
         elif b['schedule_type'] == 'interval' and b['interval_minutes']:
             trigger = IntervalTrigger(minutes=b['interval_minutes'])
             scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+            logger.info(f"⏱ Добавлена interval-рассылка #{broadcast_id}: {b['name']} каждые {b['interval_minutes']} мин")
             
-        elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
+        elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
             tz = pytz.timezone(TIMEZONE)
             now = datetime.now(tz)
             start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
             
             if start_time < now:
+                logger.info(f"⚠️ Время старта рассылки #{broadcast_id} уже прошло, запускаем немедленно")
                 asyncio.create_task(send_broadcast(broadcast_id))
                 if b['interval_minutes']:
                     trigger = IntervalTrigger(minutes=b['interval_minutes'])
                     scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+                    logger.info(f"🔄 Рассылка #{broadcast_id} будет повторяться каждые {b['interval_minutes']} мин")
             else:
                 trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                 scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
+                logger.info(f"🚀 Добавлена start_at_interval-рассылка #{broadcast_id}: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
                 
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка добавления рассылки #{broadcast_id} в планировщик: {e}")
     
     group = db.get_target_group(state["group_id"])
     
     btn_info = f"\n🔘 Кнопка: `{state['button_text']}`" if state.get('button_text') else ""
     
+    if state["schedule_type"] == "fixed":
+        schedule_info = f"⏰ {state['hour']:02d}:{state['minute']:02d} ежедневно"
+    elif state["schedule_type"] == "interval":
+        mins = state['interval_minutes']
+        hours = mins // 60
+        minutes = mins % 60
+        if hours > 0:
+            schedule_info = f"⏰ каждые {hours}ч {minutes}мин" if minutes > 0 else f"⏰ каждые {hours}ч"
+        else:
+            schedule_info = f"⏰ каждые {minutes}мин"
+    else:
+        mins = state['interval_minutes']
+        hours = mins // 60
+        minutes = mins % 60
+        if hours > 0:
+            interval_str = f"каждые {hours}ч {minutes}мин" if minutes > 0 else f"каждые {hours}ч"
+        else:
+            interval_str = f"каждые {minutes}мин"
+        schedule_info = f"🚀 старт {state['start_hour']:02d}:{state['start_minute']:02d}, затем {interval_str}"
+    
     await message.answer(
         f"✅ **Рассылка создана!**\n\n"
         f"📢 Название: {state['name']}\n"
-        f"📬 Группа: {group['name']}{btn_info}\n\n"
+        f"📬 Группа: {group['name']}\n"
+        f"{schedule_info}{btn_info}\n\n"
         f"🔍 Команда `/debug` — диагностика\n"
         f"💾 БД сохранена в: {DB_PATH}",
         parse_mode="Markdown"
     )
     
-    admin_btn_line = f"\n🔘 Кнопка: {state['button_text']}" if state.get('button_text') else ""
-    await send_to_admin(f"➕ **Новая рассылка**\n📢 {state['name']}\n📬 {group['name']}{admin_btn_line}")
+    logger.info(f"➕ Создана рассылка: {state['name']} в группу {group['name']} | Тип: {state['schedule_type']}")
     
     del admin_states[message.from_user.id]
 
@@ -1485,8 +1487,7 @@ async def main():
     scheduler.start()
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
-    
-    await send_to_admin(f"✅ **Бот запущен!**\n💾 База данных: {DB_PATH}\n🔍 /debug — диагностика\n💾 /backup — бэкап БД\n📦 /restore — восстановление БД")
+    logger.info(f"✅ Бот запущен! База данных: {DB_PATH}")
     
     await dp.start_polling(bot)
 
