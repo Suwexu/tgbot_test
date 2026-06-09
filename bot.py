@@ -421,7 +421,7 @@ async def send_broadcast(broadcast_id):
         logger.error(f"❌ ОШИБКА отправки рассылки #{broadcast_id}: {e}")
         await send_to_admin(f"❌ **Ошибка рассылки!**\n📢 {b['name']}\n❌ {str(e)[:200]}")
 
-# ==================== ЗАГРУЗКА РАССЫЛОК ====================
+# ==================== ЗАГРУЗКА РАССЫЛОК (ИСПРАВЛЕННАЯ) ====================
 async def load_broadcasts():
     logger.info("📋 Загрузка рассылок из БД...")
     broadcasts = db.get_all_broadcasts()
