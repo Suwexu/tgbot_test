@@ -369,24 +369,14 @@ def get_main_menu():
 
 # ==================== ОТПРАВКА РАССЫЛКИ ====================
 async def send_broadcast(broadcast_id):
-    logger.info(f"🚀 ЗАПУСК РАССЫЛКИ #{broadcast_id} в {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"🚀 ЗАПУСК РАССЫЛКИ #{broadcast_id}")
     
     b = db.get_broadcast(broadcast_id)
-    if not b:
-        logger.error(f"❌ Рассылка #{broadcast_id} не найдена в БД")
-        return
-    
-    if not b['is_active']:
-        logger.info(f"⏸ Рассылка #{broadcast_id} отключена")
+    if not b or not b['is_active']:
         return
     
     group = db.get_target_group(b['group_id'])
-    if not group:
-        logger.error(f"❌ Группа для рассылки #{broadcast_id} не найдена")
-        return
-    
-    if not group['is_active']:
-        logger.info(f"⏸ Группа {group['name']} отключена")
+    if not group or not group['is_active']:
         return
     
     try:
@@ -406,31 +396,26 @@ async def send_broadcast(broadcast_id):
         cursor.execute('UPDATE broadcasts SET last_sent_at = ? WHERE id = ?', (sent_at.isoformat(), broadcast_id))
         db.conn.commit()
         
-        logger.info(f"✅ Рассылка #{broadcast_id} ОТПРАВЛЕНА в {group['name']} в {sent_at.strftime('%H:%M:%S')}")
-        
-        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}\n🕐 {sent_at.strftime('%H:%M')}")
+        logger.info(f"✅ Отправлено в {group['name']}")
+        await send_to_admin(f"✅ **Рассылка отправлена!**\n📢 {b['name']}\n📬 {group['name']}")
         
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
-            logger.info(f"🔄 Рассылка #{broadcast_id} перепланирована: следующая через {b['interval_minutes']} мин")
             
     except Exception as e:
-        logger.error(f"❌ ОШИБКА отправки рассылки #{broadcast_id}: {e}")
-        await send_to_admin(f"❌ **Ошибка рассылки!**\n📢 {b['name']}\n❌ {str(e)[:200]}")
+        logger.error(f"❌ Ошибка: {e}")
 
-# ==================== ЗАГРУЗКА РАССЫЛОК (ИСПРАВЛЕННАЯ) ====================
+# ==================== ЗАГРУЗКА РАССЫЛОК ====================
 async def load_broadcasts():
     logger.info("📋 Загрузка рассылок из БД...")
     broadcasts = db.get_all_broadcasts()
-    logger.info(f"📋 Найдено рассылок в БД: {len(broadcasts)}")
+    logger.info(f"📋 Найдено рассылок: {len(broadcasts)}")
     
-    loaded_count = 0
     for b in broadcasts:
         if not b['is_active']:
-            logger.info(f"⏸ Рассылка #{b['id']} '{b['name']}' неактивна, пропускаем")
             continue
         
         job_id = f"broadcast_{b['id']}"
@@ -442,18 +427,12 @@ async def load_broadcasts():
             if b['schedule_type'] == 'fixed' and b['hour'] is not None:
                 trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
                 scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-                logger.info(f"📅 ЗАГРУЖЕНА fixed-рассылка #{b['id']}: '{b['name']}' в {b['hour']:02d}:{b['minute']:02d} ({TIMEZONE})")
-                loaded_count += 1
+                logger.info(f"📅 Загружена fixed: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
                 
             elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                 trigger = IntervalTrigger(minutes=b['interval_minutes'])
                 scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-                mins = b['interval_minutes']
-                h = mins // 60
-                m = mins % 60
-                schedule_text = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
-                logger.info(f"⏱ ЗАГРУЖЕНА interval-рассылка #{b['id']}: '{b['name']}' {schedule_text}")
-                loaded_count += 1
+                logger.info(f"⏱ Загружена interval: {b['name']} каждые {b['interval_minutes']} мин")
                 
             elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
                 tz = pytz.timezone(TIMEZONE)
@@ -461,28 +440,22 @@ async def load_broadcasts():
                 start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
                 
                 if start_time < now:
-                    logger.info(f"⚠️ Время старта рассылки #{b['id']} уже прошло сегодня, запускаем немедленно")
+                    logger.info(f"⚠️ Время старта рассылки #{b['id']} уже прошло, запускаем немедленно")
                     asyncio.create_task(send_broadcast(b['id']))
                     if b['interval_minutes']:
                         trigger = IntervalTrigger(minutes=b['interval_minutes'])
                         scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                         logger.info(f"🔄 Рассылка #{b['id']} будет повторяться каждые {b['interval_minutes']} мин")
-                        loaded_count += 1
                 else:
                     trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                     scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
-                    logger.info(f"🚀 ЗАГРУЖЕНА start_at_interval-рассылка #{b['id']}: '{b['name']}' старт {b['start_hour']:02d}:{b['start_minute']:02d} ({TIMEZONE})")
-                    loaded_count += 1
+                    logger.info(f"🚀 Загружена start_at_interval: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки рассылки #{b['id']}: {e}")
     
-    logger.info(f"✅ Загружено активных рассылок в планировщик: {loaded_count}")
-    
     jobs = scheduler.get_jobs()
     logger.info(f"📋 Всего задач в планировщике: {len(jobs)}")
-    for job in jobs:
-        logger.info(f"   • {job.id} -> next: {job.next_run_time}")
 
 # ==================== ОБРАБОТЧИК НАЖАТИЙ КНОПОК ====================
 @dp.callback_query(lambda c: c.data and c.data.startswith("btn_"))
@@ -570,9 +543,8 @@ async def cmd_start(message: Message):
         await message.answer(
             f"✅ **Бот для рассылок с кнопками!**\n\n"
             f"📌 Добавь бота в группу, сделай админом и отправь /start\n"
-            f"👨‍💻 Затем напиши /admin в личные сообщения\n\n"
-            f"📊 Команда `/top` в группе — показать статистику реакции сотрудников\n"
-            f"🔍 Команда `/debug` — диагностика (только для админа)\n\n"
+            f"👨‍💻 Затем напиши /admin\n\n"
+            f"🔍 Команда `/debug` — диагностика\n"
             f"🕐 Часовой пояс: {TIMEZONE}",
             parse_mode="Markdown"
         )
@@ -580,12 +552,12 @@ async def cmd_start(message: Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа к этой команде. Только администратор бота может управлять рассылками.")
+        await message.answer("⛔ У вас нет доступа к этой команде.")
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /admin от {message.from_user.id}")
         return
     
     if ADMIN_GROUP_ID and message.chat.id != ADMIN_GROUP_ID and message.chat.type != 'private':
-        await message.answer(f"⛔ Управление доступно только в админской группе или личных сообщениях.\n📢 ID админской группы: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
+        await message.answer(f"⛔ Управление доступно только в админской группе.\n📢 ID: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
         return
     
     await message.answer("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
@@ -596,6 +568,7 @@ async def cmd_id(message: Message):
 
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
+    """Диагностика бота"""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
@@ -603,84 +576,60 @@ async def cmd_debug(message: Message):
     broadcasts = db.get_all_broadcasts()
     jobs = scheduler.get_jobs()
     
-    text = "🔍 **ДИАГНОСТИКА БОТА**\n\n"
+    text = f"🔍 **ДИАГНОСТИКА**\n\n"
     text += f"🕐 Часовой пояс: `{TIMEZONE}`\n"
     text += f"📅 Текущее время: `{datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-    
-    text += f"📋 **Рассылок в БД:** {len(broadcasts)}\n"
-    text += f"⏰ **Задач в планировщике:** {len(jobs)}\n\n"
+    text += f"📋 Рассылок в БД: `{len(broadcasts)}`\n"
+    text += f"⏰ Задач в планировщике: `{len(jobs)}`\n\n"
     
     if broadcasts:
-        text += "**📋 СПИСОК РАССЫЛОК В БД:**\n"
+        text += "**📋 Рассылки:**\n"
         for b in broadcasts:
             status = "✅" if b['is_active'] else "⛔"
             if b['schedule_type'] == 'fixed':
                 schedule = f"{b['hour']:02d}:{b['minute']:02d} ежедневно"
             elif b['schedule_type'] == 'interval':
-                mins = b['interval_minutes']
-                h = mins // 60
-                m = mins % 60
-                schedule = f"каждые {h}ч {m}мин" if h else f"каждые {m}мин"
+                schedule = f"каждые {b['interval_minutes']} мин"
             else:
                 schedule = f"старт {b['start_hour']:02d}:{b['start_minute']:02d}, затем каждые {b['interval_minutes']} мин"
-            btn = f" 🔘{b['button_text']}" if b.get('button_text') else ""
-            text += f"{status} ID:{b['id']} **{b['name']}**{btn}\n   ⏰ {schedule}\n"
+            text += f"{status} ID:{b['id']} **{b['name']}** — {schedule}\n"
     
     if jobs:
-        text += "\n**⏰ ЗАДАЧИ В ПЛАНИРОВЩИКЕ:**\n"
+        text += "\n**⏰ Задачи в планировщике:**\n"
         for job in jobs:
             next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else "None"
-            text += f"• `{job.id}` -> next: {next_run}\n"
+            text += f"• `{job.id}` -> {next_run}\n"
     else:
-        text += "\n⚠️ **В планировщике НЕТ задач!**\n"
+        text += "\n⚠️ **НЕТ ЗАДАЧ В ПЛАНИРОВЩИКЕ!**\n"
     
     groups = db.get_all_target_groups()
-    text += f"\n**📢 ГРУППЫ В БД:** {len(groups)}\n"
+    text += f"\n**📢 Группы:** {len(groups)}\n"
     for g in groups:
-        status = "✅" if g['is_active'] else "⛔"
-        text += f"{status} {g['name']} (ID: `{g['chat_id']}`)\n"
+        text += f"• {g['name']} (`{g['chat_id']}`)\n"
     
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     if message.chat.type not in ['group', 'supergroup']:
-        await message.answer(
-            "📊 **Команда `/top` работает только в группах!**\n\n"
-            "Добавьте бота в группу, сделайте администратором, "
-            "а затем отправьте `/top` в этой группе, чтобы увидеть статистику реакции сотрудников.",
-            parse_mode="Markdown"
-        )
+        await message.answer("📊 **Команда `/top` работает только в группах!**", parse_mode="Markdown")
         return
     
     chat_id = str(message.chat.id)
     group = db.get_target_group_by_chat_id(chat_id)
     
     if not group:
-        await message.answer(
-            "❌ **Группа не зарегистрирована в боте!**\n\n"
-            "Отправьте команду `/start` в этой группе, чтобы зарегистрировать её.",
-            parse_mode="Markdown"
-        )
+        await message.answer("❌ **Группа не зарегистрирована!** Отправьте /start", parse_mode="Markdown")
         return
     
     if not group['is_active']:
-        await message.answer(
-            "⛔ **Группа отключена администратором**\n\n"
-            "Рассылки в эту группу временно не отправляются.",
-            parse_mode="Markdown"
-        )
+        await message.answer("⛔ **Группа отключена администратором**", parse_mode="Markdown")
         return
     
     top = db.get_top_fastest_by_group(group['id'], 20)
     
     if not top:
-        await message.answer(
-            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
-            f"Пока никто не нажимал на кнопки в рассылках этой группы.\n"
-            f"Дождитесь следующей рассылки с кнопкой.",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"📭 **Нет данных о реакции в группе {group['name']}**", parse_mode="Markdown")
         return
     
     total_clicks = db.get_total_clicks_by_group(group['id'])
@@ -697,33 +646,23 @@ async def cmd_top(message: Message):
         user_id, username, first_name, avg_time, clicks_count = row
         name = first_name or username or str(user_id)
         medal = medals[i] if i < 3 else f"{i+1}."
-        
         avg_str = format_time(avg_time)
-        
         if len(name) > 20:
             name = name[:17] + "..."
-        
-        text += f"{medal} **{name}**\n"
-        text += f"   ⚡ Средняя скорость: {avg_str}\n"
-        text += f"   👆 Нажатий: {clicks_count}\n\n"
+        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
     
     user_stats = db.get_user_stats_by_group(group['id'], message.from_user.id)
     if user_stats and user_stats[1] > 0:
         avg_time, clicks_count = user_stats
-        text += f"📊 **Ваша статистика:**\n"
-        text += f"   ⚡ Средняя скорость: {format_time(avg_time)}\n"
-        text += f"   👆 Всего нажатий: {clicks_count}\n"
-    else:
-        text += f"\n📊 Вы ещё не нажимали на кнопки в этой группе."
+        text += f"\n📊 **Ваша статистика:** {format_time(avg_time)} ({clicks_count} наж.)"
     
     await message.answer(text, parse_mode="Markdown")
 
-# ==================== CALLBACK ОБРАБОТЧИК МЕНЮ ====================
+# ==================== CALLBACK ОБРАБОТЧИК ====================
 @dp.callback_query()
 async def handle_callback(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         await call.answer("⛔ Нет доступа", show_alert=True)
-        logger.warning(f"⚠️ Неавторизованный callback от {call.from_user.id}")
         return
     
     data = call.data
@@ -747,7 +686,6 @@ async def handle_callback(call: CallbackQuery):
         await call.message.edit_text("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
     elif data == "top_all":
         await show_all_broadcasts_top(call.message)
-    
     elif data == "add_group":
         admin_states[call.from_user.id] = {"step": "add_group_id"}
         await call.message.answer("📢 Введите ID группы (число):\nПример: -1001234567890")
@@ -1003,15 +941,10 @@ async def show_broadcast_top(message, broadcast_id):
         user_id, username, first_name, avg_time, clicks_count = row
         name = first_name or username or str(user_id)
         medal = medals[i] if i < 3 else f"{i+1}."
-        
         avg_str = format_time(avg_time)
-        
         if len(name) > 20:
             name = name[:17] + "..."
-        
-        text += f"{medal} **{name}**\n"
-        text += f"   ⚡ Средняя скорость: {avg_str}\n"
-        text += f"   👆 Нажатий: {clicks_count}\n\n"
+        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_top")]
@@ -1027,11 +960,7 @@ async def show_group_top(message, group_id):
     top = db.get_top_fastest_by_group(group_id, 20)
     
     if not top:
-        await message.edit_text(
-            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
-            f"Пока никто не нажимал на кнопки в рассылках этой группы.",
-            parse_mode="Markdown"
-        )
+        await message.edit_text(f"📭 Нет данных о реакции в группе {group['name']}", parse_mode="Markdown")
         return
     
     total_clicks = db.get_total_clicks_by_group(group_id)
@@ -1048,15 +977,10 @@ async def show_group_top(message, group_id):
         user_id, username, first_name, avg_time, clicks_count = row
         name = first_name or username or str(user_id)
         medal = medals[i] if i < 3 else f"{i+1}."
-        
         avg_str = format_time(avg_time)
-        
         if len(name) > 20:
             name = name[:17] + "..."
-        
-        text += f"{medal} **{name}**\n"
-        text += f"   ⚡ Средняя скорость: {avg_str}\n"
-        text += f"   👆 Нажатий: {clicks_count}\n\n"
+        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
@@ -1067,18 +991,14 @@ async def show_all_broadcasts_top(message):
     top = db.get_top_fastest_all(20)
     
     if not top:
-        await message.edit_text(
-            "📭 **Нет данных о реакции сотрудников**\n\n"
-            "Пока никто не нажимал на кнопки в рассылках.",
-            parse_mode="Markdown"
-        )
+        await message.edit_text("📭 **Нет данных о реакции сотрудников**", parse_mode="Markdown")
         return
     
     total_clicks = db.get_total_clicks_all()
     total_users = db.get_total_users_all()
     
     text = f"📊 **Общий список времени реакции сотрудников**\n\n"
-    text += f"📅 Данные собраны за всё время работы бота\n"
+    text += f"📅 Данные собраны за всё время\n"
     text += f"👆 Всего нажатий: {total_clicks}\n"
     text += f"👥 Участников: {total_users}\n\n"
     text += "**Рейтинг (по средней скорости):**\n\n"
@@ -1088,15 +1008,10 @@ async def show_all_broadcasts_top(message):
         user_id, username, first_name, avg_time, clicks_count = row
         name = first_name or username or str(user_id)
         medal = medals[i] if i < 3 else f"{i+1}."
-        
         avg_str = format_time(avg_time)
-        
         if len(name) > 20:
             name = name[:17] + "..."
-        
-        text += f"{medal} **{name}**\n"
-        text += f"   ⚡ Средняя скорость: {avg_str}\n"
-        text += f"   👆 Нажатий: {clicks_count}\n\n"
+        text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
@@ -1223,15 +1138,14 @@ async def handle_input(message: Message):
     elif step == "name":
         state["name"] = message.text
         state["step"] = "text"
-        await message.answer("📝 **Введите текст рассылки**\n\nОтправьте текст, который будет отправлен в группу:", parse_mode="Markdown")
+        await message.answer("📝 **Введите текст рассылки**", parse_mode="Markdown")
     
     elif step == "text":
         state["text"] = message.text
         state["step"] = "button"
         await message.answer(
             "🔘 **Добавить кнопку?**\n\n"
-            "Отправьте текст кнопки (например: `Нажми меня!`)\n"
-            "Или отправьте `пропустить` для рассылки без кнопки",
+            "Отправьте текст кнопки или `пропустить`",
             parse_mode="Markdown"
         )
     
@@ -1243,7 +1157,7 @@ async def handle_input(message: Message):
             await message.answer(
                 "⏰ **Тип расписания**\n\n"
                 "`1` - В определённое время (ежедневно)\n"
-                "`2` - Простой интервал (каждые X минут)\n"
+                "`2` - Простой интервал\n"
                 "`3` - Старт в указанное время + интервал\n\n"
                 "Отправьте 1, 2 или 3:",
                 parse_mode="Markdown"
@@ -1253,32 +1167,27 @@ async def handle_input(message: Message):
             state["step"] = "edit_message"
             await message.answer(
                 "✏️ **Текст после нажатия**\n\n"
-                "Отправьте текст, который будет показан после нажатия на кнопку.\n\n"
-                "**Доступные переменные:**\n"
-                "`{mention}` - упоминание пользователя (@username или ссылка)\n"
-                "`{name}` - имя пользователя\n"
-                "`{user_id}` - ID пользователя\n"
-                "`{username}` - username\n"
-                "`{time}` - время нажатия (только часы:минуты)\n"
-                "`{reaction}` - время реакции\n"
-                "`{button}` - текст кнопки\n\n"
-                "**Пример:**\n"
-                "`✅ Спасибо, {mention}!\\n🕐 Время: {time}\\n⚡ Реакция: {reaction}`\n\n"
-                "Или отправьте `пропустить` для стандартного текста",
+                "Доступные переменные:\n"
+                "`{mention}` - упоминание\n"
+                "`{name}` - имя\n"
+                "`{user_id}` - ID\n"
+                "`{time}` - время (ЧЧ:ММ)\n"
+                "`{reaction}` - время реакции\n\n"
+                "Отправьте текст или `пропустить`",
                 parse_mode="Markdown"
             )
     
     elif step == "edit_message":
         if message.text.lower() in ["пропустить", "skip", "-"]:
-            state["edit_message"] = "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
+            state["edit_message"] = "✅ Нажал: {mention}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
         else:
             state["edit_message"] = message.text
         state["step"] = "schedule_type"
         await message.answer(
             "⏰ **Тип расписания**\n\n"
-            "`1` - В определённое время (ежедневно)\n"
-            "`2` - Простой интервал (каждые X минут)\n"
-            "`3` - Старт в указанное время + интервал\n\n"
+            "`1` - В определённое время\n"
+            "`2` - Простой интервал\n"
+            "`3` - Старт + интервал\n\n"
             "Отправьте 1, 2 или 3:",
             parse_mode="Markdown"
         )
@@ -1287,15 +1196,15 @@ async def handle_input(message: Message):
         if message.text == "1":
             state["schedule_type"] = "fixed"
             state["step"] = "fixed_time"
-            await message.answer(f"⏰ Введите время в формате `HH:MM` (часовой пояс {TIMEZONE})", parse_mode="Markdown")
+            await message.answer(f"⏰ Введите время (ЧЧ:ММ), часовой пояс {TIMEZONE}", parse_mode="Markdown")
         elif message.text == "2":
             state["schedule_type"] = "interval"
             state["step"] = "interval"
-            await message.answer("⏰ Введите интервал в минутах (например, 60, 30, 120):")
+            await message.answer("⏰ Введите интервал в минутах:")
         elif message.text == "3":
             state["schedule_type"] = "start_at_interval"
             state["step"] = "start_time"
-            await message.answer(f"🚀 Введите **первое время** отправки в формате `HH:MM` (часовой пояс {TIMEZONE})", parse_mode="Markdown")
+            await message.answer(f"🚀 Введите первое время (ЧЧ:ММ), часовой пояс {TIMEZONE}", parse_mode="Markdown")
         else:
             await message.answer("❌ Отправьте 1, 2 или 3")
     
@@ -1329,7 +1238,7 @@ async def handle_input(message: Message):
                 state["start_hour"] = h
                 state["start_minute"] = m
                 state["step"] = "interval_after_start"
-                await message.answer("⏰ **Интервал повторения** (в минутах)\n\nПример: 120 → каждые 2 часа\nОтправьте число:")
+                await message.answer("⏰ Введите интервал повторения (минуты):")
             else:
                 raise ValueError
         except:
@@ -1368,12 +1277,10 @@ async def save_broadcast(message, state):
         if b['schedule_type'] == 'fixed' and b['hour']:
             trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
             scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-            logger.info(f"📅 Добавлена fixed-рассылка #{broadcast_id}: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
             
         elif b['schedule_type'] == 'interval' and b['interval_minutes']:
             trigger = IntervalTrigger(minutes=b['interval_minutes'])
             scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-            logger.info(f"⏱ Добавлена interval-рассылка #{broadcast_id}: {b['name']} каждые {b['interval_minutes']} мин")
             
         elif b['schedule_type'] == 'start_at_interval' and b['start_hour']:
             tz = pytz.timezone(TIMEZONE)
@@ -1381,45 +1288,31 @@ async def save_broadcast(message, state):
             start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
             
             if start_time < now:
-                logger.info(f"⚠️ Время старта уже прошло, запускаем рассылку #{broadcast_id} немедленно")
                 asyncio.create_task(send_broadcast(broadcast_id))
                 if b['interval_minutes']:
                     trigger = IntervalTrigger(minutes=b['interval_minutes'])
                     scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-                    logger.info(f"🔄 Рассылка #{broadcast_id} будет повторяться каждые {b['interval_minutes']} мин")
             else:
                 trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                 scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
-                logger.info(f"🚀 Добавлена start_at_interval-рассылка #{broadcast_id}: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
                 
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления рассылки #{broadcast_id} в планировщик: {e}")
+        logger.error(f"❌ Ошибка: {e}")
     
     group = db.get_target_group(state["group_id"])
     
     btn_info = f"\n🔘 Кнопка: `{state['button_text']}`" if state.get('button_text') else ""
-    edit_info = "\n✏️ После нажатия: сообщение редактируется" if state.get('button_text') else ""
     
     await message.answer(
         f"✅ **Рассылка создана!**\n\n"
         f"📢 Название: {state['name']}\n"
-        f"📬 Группа: {group['name']}{btn_info}{edit_info}\n\n"
-        f"📌 При нажатии на кнопку:\n"
-        f"   • Замеряется время реакции\n"
-        f"   • Сообщение заменяется на указанный текст с упоминанием\n"
-        f"   • Время отображается в формате ЧЧ:ММ\n"
-        f"   • Ведётся статистика средней скорости\n\n"
-        f"📊 Команда `/top` в группе — показать статистику\n"
+        f"📬 Группа: {group['name']}{btn_info}\n\n"
         f"🔍 Команда `/debug` — диагностика",
         parse_mode="Markdown"
     )
     
     admin_btn_line = f"\n🔘 Кнопка: {state['button_text']}" if state.get('button_text') else ""
-    await send_to_admin(
-        f"➕ **Новая рассылка**\n"
-        f"📢 {state['name']}\n"
-        f"📬 {group['name']}{admin_btn_line}"
-    )
+    await send_to_admin(f"➕ **Новая рассылка**\n📢 {state['name']}\n📬 {group['name']}{admin_btn_line}")
     
     del admin_states[message.from_user.id]
 
@@ -1428,20 +1321,14 @@ async def main():
     logger.info("🚀 БОТ ЗАПУСКАЕТСЯ...")
     logger.info(f"📅 Часовой пояс: {TIMEZONE}")
     logger.info(f"👑 Админ ID: {ADMIN_ID}")
-    logger.info(f"📢 Админская группа: {ADMIN_GROUP_ID if ADMIN_GROUP_ID else 'Не настроена'}")
     
     await load_broadcasts()
     scheduler.start()
     
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
     
-    jobs = scheduler.get_jobs()
-    logger.info(f"📋 Всего задач в планировщике после запуска: {len(jobs)}")
-    for job in jobs:
-        logger.info(f"   • {job.id} -> next: {job.next_run_time}")
-    
     if ADMIN_GROUP_ID:
-        await send_to_admin("✅ **Бот перезапущен и готов к работе!**\n\n📊 Команда `/top` в группе — список времени реакции сотрудников\n🔍 Команда `/debug` — диагностика\n🕐 Время нажатия отображается в формате ЧЧ:ММ")
+        await send_to_admin("✅ **Бот запущен!**\n🔍 /debug — диагностика")
     
     await dp.start_polling(bot)
 
