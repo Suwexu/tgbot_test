@@ -228,6 +228,16 @@ class Database:
         cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE broadcast_id = ?', (broadcast_id,))
         return cursor.fetchone()[0]
     
+    def get_total_clicks_all(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE reaction_time IS NOT NULL')
+        return cursor.fetchone()[0]
+    
+    def get_total_users_all(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(DISTINCT user_id) FROM button_clicks WHERE reaction_time IS NOT NULL')
+        return cursor.fetchone()[0]
+    
     def get_top_fastest_all(self, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -257,14 +267,16 @@ class Database:
     def get_total_clicks_by_group(self, group_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT COUNT(*) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+            SELECT COUNT(*) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
         ''', (group_id,))
         return cursor.fetchone()[0]
     
     def get_total_users_by_group(self, group_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT COUNT(DISTINCT bc.user_id) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+            SELECT COUNT(DISTINCT bc.user_id) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
         ''', (group_id,))
         return cursor.fetchone()[0]
     
@@ -363,7 +375,6 @@ async def send_broadcast(broadcast_id):
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
-            logger.info(f"🔄 Рассылка #{broadcast_id} перепланирована: следующая через {b['interval_minutes']} мин")
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
 
