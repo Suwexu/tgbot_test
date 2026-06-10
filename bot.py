@@ -17,6 +17,7 @@ TOP_VIEWERS_STR = os.getenv("TOP_VIEWERS", "")
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
+# Преобразуем строки в списки чисел
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
 TOP_VIEWERS = [int(x.strip()) for x in TOP_VIEWERS_STR.split(",") if x.strip().isdigit()] if TOP_VIEWERS_STR else []
 
@@ -35,7 +36,7 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 admin_states = {}
 
-# ==================== ПУТЬ К БАЗЕ ДАННЫХ ====================
+# ==================== НАСТРОЙКА ПУТИ К БАЗЕ ДАННЫХ ====================
 VOLUME_PATH = '/app/data'
 if os.path.exists(VOLUME_PATH) and os.path.isdir(VOLUME_PATH):
     DB_PATH = os.path.join(VOLUME_PATH, 'bot_database.db')
@@ -52,6 +53,8 @@ class Database:
         db_dir = os.path.dirname(DB_PATH)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"📁 Создана директория для БД: {db_dir}")
+        
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.init_tables()
         logger.info(f"✅ База данных подключена: {DB_PATH}")
@@ -98,6 +101,7 @@ class Database:
             )
         ''')
         self.conn.commit()
+        logger.info("✅ Таблицы базы данных инициализированы")
     
     def add_target_group(self, chat_id, name):
         cursor = self.conn.cursor()
@@ -228,38 +232,49 @@ class Database:
         cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE broadcast_id = ?', (broadcast_id,))
         return cursor.fetchone()[0]
     
-    def get_total_clicks_all(self):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM button_clicks WHERE reaction_time IS NOT NULL')
-        return cursor.fetchone()[0]
-    
-    def get_total_users_all(self):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(DISTINCT user_id) FROM button_clicks WHERE reaction_time IS NOT NULL')
-        return cursor.fetchone()[0]
-    
     def get_top_fastest_all(self, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT user_id, username, first_name, ROUND(AVG(reaction_time), 2) as avg_time, COUNT(*) as clicks_count
-            FROM button_clicks WHERE reaction_time IS NOT NULL GROUP BY user_id ORDER BY avg_time ASC LIMIT ?
+            SELECT 
+                user_id, 
+                username, 
+                first_name, 
+                ROUND(AVG(reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks
+            WHERE reaction_time IS NOT NULL
+            GROUP BY user_id
+            ORDER BY avg_time ASC
+            LIMIT ?
         ''', (limit,))
         return cursor.fetchall()
     
     def get_top_fastest_by_group(self, group_id, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT bc.user_id, bc.username, bc.first_name, ROUND(AVG(bc.reaction_time), 2) as avg_time, COUNT(*) as clicks_count
-            FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
-            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL GROUP BY bc.user_id ORDER BY avg_time ASC LIMIT ?
+            SELECT 
+                bc.user_id, 
+                bc.username, 
+                bc.first_name, 
+                ROUND(AVG(bc.reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
+            WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
+            GROUP BY bc.user_id
+            ORDER BY avg_time ASC
+            LIMIT ?
         ''', (group_id, limit))
         return cursor.fetchall()
     
     def get_user_stats_by_group(self, group_id, user_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT ROUND(AVG(bc.reaction_time), 2) as avg_time, COUNT(*) as clicks_count
-            FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
+            SELECT 
+                ROUND(AVG(bc.reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
             WHERE b.group_id = ? AND bc.user_id = ? AND bc.reaction_time IS NOT NULL
         ''', (group_id, user_id))
         return cursor.fetchone()
@@ -267,7 +282,9 @@ class Database:
     def get_total_clicks_by_group(self, group_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT COUNT(*) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
+            SELECT COUNT(*) 
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
             WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
         ''', (group_id,))
         return cursor.fetchone()[0]
@@ -275,7 +292,9 @@ class Database:
     def get_total_users_by_group(self, group_id):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT COUNT(DISTINCT bc.user_id) FROM button_clicks bc JOIN broadcasts b ON bc.broadcast_id = b.id
+            SELECT COUNT(DISTINCT bc.user_id)
+            FROM button_clicks bc
+            JOIN broadcasts b ON bc.broadcast_id = b.id
             WHERE b.group_id = ? AND bc.reaction_time IS NOT NULL
         ''', (group_id,))
         return cursor.fetchone()[0]
@@ -283,14 +302,23 @@ class Database:
     def get_top_fastest(self, broadcast_id, limit=20):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT user_id, username, first_name, ROUND(AVG(reaction_time), 2) as avg_time, COUNT(*) as clicks_count
-            FROM button_clicks WHERE broadcast_id = ? AND reaction_time IS NOT NULL GROUP BY user_id ORDER BY avg_time ASC LIMIT ?
+            SELECT 
+                user_id, 
+                username, 
+                first_name, 
+                ROUND(AVG(reaction_time), 2) as avg_time,
+                COUNT(*) as clicks_count
+            FROM button_clicks
+            WHERE broadcast_id = ? AND reaction_time IS NOT NULL
+            GROUP BY user_id
+            ORDER BY avg_time ASC
+            LIMIT ?
         ''', (broadcast_id, limit))
         return cursor.fetchall()
 
 db = Database()
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ФУНКЦИИ ПРОВЕРКИ ПРАВ ====================
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
@@ -316,6 +344,7 @@ def format_time(seconds):
         return f"{mins} мин {secs:.0f} сек"
 
 def get_schedule_info(broadcast):
+    """Формирует текстовое описание расписания"""
     if broadcast['schedule_type'] == 'fixed':
         return f"⏰ {broadcast['hour']:02d}:{broadcast['minute']:02d} ежедневно"
     elif broadcast['schedule_type'] == 'interval':
@@ -350,31 +379,41 @@ def get_main_menu():
 # ==================== ОТПРАВКА РАССЫЛКИ ====================
 async def send_broadcast(broadcast_id):
     logger.info(f"🚀 ЗАПУСК РАССЫЛКИ #{broadcast_id}")
+    
     b = db.get_broadcast(broadcast_id)
     if not b or not b['is_active']:
         return
+    
     group = db.get_target_group(b['group_id'])
     if not group or not group['is_active']:
         return
+    
     try:
         chat_id = int(group['chat_id'])
         sent_at = datetime.now(pytz.timezone(TIMEZONE))
+        
         reply_markup = None
         if b.get('button_text'):
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=b['button_text'], callback_data=f"btn_{broadcast_id}")]
             ])
+        
         await bot.send_message(chat_id, b['text'], reply_markup=reply_markup, parse_mode="HTML")
+        
         db.update_last_sent(broadcast_id)
         cursor = db.conn.cursor()
         cursor.execute('UPDATE broadcasts SET last_sent_at = ? WHERE id = ?', (sent_at.isoformat(), broadcast_id))
         db.conn.commit()
+        
         logger.info(f"✅ Отправлено в {group['name']}")
+        
         if b['schedule_type'] == 'start_at_interval' and b['interval_minutes']:
             job_id = f"broadcast_{broadcast_id}"
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
             scheduler.add_job(send_broadcast, IntervalTrigger(minutes=b['interval_minutes']), args=[broadcast_id], id=job_id)
+            logger.info(f"🔄 Рассылка #{broadcast_id} перепланирована: следующая через {b['interval_minutes']} мин")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
 
@@ -383,26 +422,41 @@ async def load_broadcasts():
     logger.info("📋 Загрузка рассылок из БД...")
     broadcasts = db.get_all_broadcasts()
     logger.info(f"📋 Найдено рассылок: {len(broadcasts)}")
+    
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
+    
     for b in broadcasts:
         if not b['is_active']:
             continue
+        
         job_id = f"broadcast_{b['id']}"
+        
         if scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
+        
         try:
             if b['schedule_type'] == 'fixed' and b['hour'] is not None:
+                schedule_time = now.replace(hour=b['hour'], minute=b['minute'], second=0, microsecond=0)
+                
+                if schedule_time < now:
+                    schedule_time += timedelta(days=1)
+                    logger.info(f"⏰ Время рассылки #{b['id']} уже прошло сегодня, переносим на завтра")
+                
                 trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
                 scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                 logger.info(f"📅 Загружена fixed: {b['name']} в {b['hour']:02d}:{b['minute']:02d}")
+                
             elif b['schedule_type'] == 'interval' and b['interval_minutes']:
                 trigger = IntervalTrigger(minutes=b['interval_minutes'])
                 scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                 logger.info(f"⏱ Загружена interval: {b['name']} каждые {b['interval_minutes']} мин")
+                
             elif b['schedule_type'] == 'start_at_interval' and b['start_hour'] is not None:
                 start_time = now.replace(hour=b['start_hour'], minute=b['start_minute'], second=0, microsecond=0)
+                
                 if start_time < now:
+                    logger.info(f"⚠️ Время старта рассылки #{b['id']} уже прошло, НЕ запускаем пропущенную")
                     if b['interval_minutes']:
                         trigger = IntervalTrigger(minutes=b['interval_minutes'])
                         scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
@@ -411,8 +465,10 @@ async def load_broadcasts():
                     trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                     scheduler.add_job(send_broadcast, trigger, args=[b['id']], id=job_id)
                     logger.info(f"🚀 Загружена start_at_interval: {b['name']} старт {b['start_hour']:02d}:{b['start_minute']:02d}")
+                
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки рассылки #{b['id']}: {e}")
+    
     jobs = scheduler.get_jobs()
     logger.info(f"📋 Всего задач в планировщике: {len(jobs)}")
 
@@ -422,12 +478,16 @@ async def handle_button_click(call: CallbackQuery):
     broadcast_id = int(call.data.split("_")[1])
     user = call.from_user
     broadcast = db.get_broadcast(broadcast_id)
+    
     if not broadcast:
         await call.answer("❌ Рассылка не найдена", show_alert=True)
         return
+    
     button_text = broadcast['button_text']
     edit_template = broadcast.get('edit_message') or "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
+    
     click_time = datetime.now(pytz.timezone(TIMEZONE))
+    
     reaction_time = None
     sent_at_str = broadcast.get('last_sent_at')
     if sent_at_str:
@@ -438,31 +498,50 @@ async def handle_button_click(call: CallbackQuery):
             reaction_time = (click_time - sent_at).total_seconds()
         except:
             pass
-    db.save_click(broadcast_id, user.id, user.username, user.first_name, button_text, reaction_time, sent_at_str)
+    
+    db.save_click(
+        broadcast_id=broadcast_id,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        button_text=button_text,
+        reaction_time=reaction_time,
+        sent_at=sent_at_str
+    )
+    
     mention = get_user_mention(user)
     user_name = user.first_name or user.username or str(user.id)
     time_str = click_time.strftime('%H:%M')
     reaction_str = format_time(reaction_time) if reaction_time else "неизвестно"
+    
     edit_text = edit_template.format(
-        mention=mention, name=user_name, user_id=user.id,
-        username=user.username or "нет", time=time_str,
-        reaction=reaction_str, button=button_text
+        mention=mention,
+        name=user_name,
+        user_id=user.id,
+        username=user.username or "нет",
+        time=time_str,
+        reaction=reaction_str,
+        button=button_text
     )
+    
     try:
         await call.message.edit_text(edit_text, parse_mode="HTML")
         await call.answer(f"✅ Ваш голос учтён! Время реакции: {reaction_str}", show_alert=False)
     except Exception as e:
         logger.error(f"Ошибка редактирования: {e}")
         await call.answer(f"✅ Спасибо, {user_name}!", show_alert=False)
+    
     logger.info(f"🔘 Нажатие: {user.id} ({user_name}) на рассылку #{broadcast_id}, реакция: {reaction_str}")
 
 # ==================== КОМАНДЫ ====================
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Команда `/start` доступна только администраторам бота.", parse_mode="Markdown")
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /start от {message.from_user.id}")
         return
+    
     if message.chat.type in ['group', 'supergroup']:
         chat_id = str(message.chat.id)
         if not db.get_target_group_by_chat_id(chat_id):
@@ -486,27 +565,57 @@ async def cmd_start(message: Message):
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     if not can_view_top(message.from_user.id):
-        await message.answer("⛔ **У вас нет доступа к команде `/top`.**", parse_mode="Markdown")
+        await message.answer(
+            "⛔ **У вас нет доступа к команде `/top`.**\n\n"
+            "Эта команда доступна только администраторам и специально назначенным сотрудникам.",
+            parse_mode="Markdown"
+        )
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /top от {message.from_user.id}")
         return
+    
     if message.chat.type not in ['group', 'supergroup']:
         await message.answer("📊 **Команда `/top` работает только в группах!**", parse_mode="Markdown")
         return
+    
     chat_id = str(message.chat.id)
     group = db.get_target_group_by_chat_id(chat_id)
+    
     if not group:
-        await message.answer("❌ **Группа не зарегистрирована!** Отправьте /start", parse_mode="Markdown")
+        await message.answer(
+            "❌ **Группа не зарегистрирована в боте!**\n\n"
+            "Пожалуйста, попросите администратора зарегистрировать группу через команду `/start`.",
+            parse_mode="Markdown"
+        )
         return
+    
     if not group['is_active']:
-        await message.answer("⛔ **Группа отключена администратором**", parse_mode="Markdown")
+        await message.answer(
+            "⛔ **Группа отключена администратором**\n\n"
+            "Рассылки в эту группу временно не отправляются.",
+            parse_mode="Markdown"
+        )
         return
+    
     top = db.get_top_fastest_by_group(group['id'], 20)
+    
     if not top:
-        await message.answer(f"📭 **Нет данных о реакции в группе {group['name']}**", parse_mode="Markdown")
+        await message.answer(
+            f"📭 **Нет данных о реакции сотрудников в группе {group['name']}**\n\n"
+            f"Пока никто не нажимал на кнопки в рассылках этой группы.\n"
+            f"Дождитесь следующей рассылки с кнопкой.",
+            parse_mode="Markdown"
+        )
         return
+    
     total_clicks = db.get_total_clicks_by_group(group['id'])
     total_users = db.get_total_users_by_group(group['id'])
-    text = f"📊 **Список времени реакции сотрудников**\n\n📢 Группа: **{group['name']}**\n👆 Всего нажатий: {total_clicks}\n👥 Участников: {total_users}\n\n**Рейтинг (по средней скорости):**\n\n"
+    
+    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text += f"📢 Группа: **{group['name']}**\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
     medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(top):
         user_id, username, first_name, avg_time, clicks_count = row
@@ -516,12 +625,14 @@ async def cmd_top(message: Message):
         if len(name) > 20:
             name = name[:17] + "..."
         text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
+    
     user_stats = db.get_user_stats_by_group(group['id'], message.from_user.id)
     if user_stats and user_stats[1] > 0:
         avg_time, clicks_count = user_stats
         text += f"\n📊 **Ваша статистика:** {format_time(avg_time)} ({clicks_count} наж.)"
     else:
         text += f"\n📊 Вы ещё не нажимали на кнопки в этой группе."
+    
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("admin"))
@@ -530,9 +641,11 @@ async def cmd_admin(message: Message):
         await message.answer("⛔ У вас нет доступа к этой команде.", parse_mode="Markdown")
         logger.warning(f"⚠️ Неавторизованная попытка доступа к /admin от {message.from_user.id}")
         return
+    
     if ADMIN_GROUP_ID and message.chat.id != ADMIN_GROUP_ID and message.chat.type != 'private':
         await message.answer(f"⛔ Управление доступно только в админской группе или личных сообщениях.\n📢 ID админской группы: `{ADMIN_GROUP_ID}`", parse_mode="Markdown")
         return
+    
     await message.answer("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
 
 @dp.message(Command("id"))
@@ -540,16 +653,32 @@ async def cmd_id(message: Message):
     user_id = message.from_user.id
     is_admin_status = "✅ Да" if is_admin(user_id) else "❌ Нет"
     can_view_top_status = "✅ Да" if can_view_top(user_id) else "❌ Нет"
-    await message.answer(f"🆔 **Информация**\n\n📝 Ваш ID: `{user_id}`\n👑 Администратор: {is_admin_status}\n📊 Доступ к /top: {can_view_top_status}\n\n🆔 ID чата: `{message.chat.id}`", parse_mode="Markdown")
+    
+    await message.answer(
+        f"🆔 **Информация**\n\n"
+        f"📝 Ваш ID: `{user_id}`\n"
+        f"👑 Администратор: {is_admin_status}\n"
+        f"📊 Доступ к /top: {can_view_top_status}\n\n"
+        f"🆔 ID чата: `{message.chat.id}`",
+        parse_mode="Markdown"
+    )
 
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа. Команда `/debug` только для администраторов.", parse_mode="Markdown")
         return
+    
     broadcasts = db.get_all_broadcasts()
     jobs = scheduler.get_jobs()
-    text = f"🔍 **ДИАГНОСТИКА**\n\n🕐 Часовой пояс: `{TIMEZONE}`\n📅 Текущее время: `{datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}`\n\n📋 Рассылок в БД: `{len(broadcasts)}`\n⏰ Задач в планировщике: `{len(jobs)}`\n💾 Путь к БД: `{DB_PATH}`\n\n"
+    
+    text = f"🔍 **ДИАГНОСТИКА**\n\n"
+    text += f"🕐 Часовой пояс: `{TIMEZONE}`\n"
+    text += f"📅 Текущее время: `{datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+    text += f"📋 Рассылок в БД: `{len(broadcasts)}`\n"
+    text += f"⏰ Задач в планировщике: `{len(jobs)}`\n"
+    text += f"💾 Путь к БД: `{DB_PATH}`\n\n"
+    
     if broadcasts:
         text += "**📋 Рассылки:**\n"
         for b in broadcasts:
@@ -557,6 +686,7 @@ async def cmd_debug(message: Message):
             schedule_info = get_schedule_info(b)
             btn = f" 🔘 {b['button_text']}" if b.get('button_text') else ""
             text += f"{status} ID:{b['id']} **{b['name']}**{btn}\n   {schedule_info}\n"
+    
     if jobs:
         text += "\n**⏰ Задачи в планировщике:**\n"
         for job in jobs:
@@ -564,10 +694,12 @@ async def cmd_debug(message: Message):
             text += f"• `{job.id}` -> {next_run}\n"
     else:
         text += "\n⚠️ **НЕТ ЗАДАЧ В ПЛАНИРОВЩИКЕ!**\n"
+    
     groups = db.get_all_target_groups()
     text += f"\n**📢 Группы:** {len(groups)}\n"
     for g in groups:
         text += f"• {g['name']} (`{g['chat_id']}`)\n"
+    
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("backup"))
@@ -575,9 +707,14 @@ async def cmd_backup(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
+    
     try:
         with open(DB_PATH, 'rb') as f:
-            await bot.send_document(message.chat.id, types.BufferedInputFile(f.read(), filename=f'bot_database_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'), caption=f"📦 Бэкап базы данных от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n💾 Путь: {DB_PATH}")
+            await bot.send_document(
+                message.chat.id, 
+                types.BufferedInputFile(f.read(), filename=f'bot_database_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'),
+                caption=f"📦 Бэкап базы данных от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n💾 Путь: {DB_PATH}"
+            )
         await message.answer("✅ Бэкап базы данных создан и отправлен!")
         logger.info(f"📦 Бэкап БД создан администратором {message.from_user.id}")
     except Exception as e:
@@ -589,16 +726,31 @@ async def cmd_restore(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
+    
     if not message.reply_to_message or not message.reply_to_message.document:
-        await message.answer("📦 **Как восстановить бэкап:**\n\n1. Отправьте файл бэкапа боту\n2. Ответьте на это сообщение командой `/restore`\n\n⚠️ **ВНИМАНИЕ!** Текущая база данных будет заменена!", parse_mode="Markdown")
+        await message.answer(
+            "📦 **Как восстановить бэкап:**\n\n"
+            "1. Отправьте файл бэкапа боту\n"
+            "2. Ответьте на это сообщение командой `/restore`\n\n"
+            "⚠️ **ВНИМАНИЕ!** Текущая база данных будет заменена!",
+            parse_mode="Markdown"
+        )
         return
+    
     try:
         file_id = message.reply_to_message.document.file_id
         file = await bot.get_file(file_id)
         downloaded_file = await bot.download_file(file.file_path)
+        
         with open(DB_PATH, 'wb') as f:
             f.write(downloaded_file.getvalue())
-        await message.answer(f"✅ **База данных восстановлена!**\n\n💾 Путь: {DB_PATH}\n🔄 Перезапустите бота для применения изменений.", parse_mode="Markdown")
+        
+        await message.answer(
+            f"✅ **База данных восстановлена!**\n\n"
+            f"💾 Путь: {DB_PATH}\n"
+            f"🔄 Перезапустите бота для применения изменений.",
+            parse_mode="Markdown"
+        )
         logger.info(f"📦 БД восстановлена из бэкапа админом {message.from_user.id}")
     except Exception as e:
         await message.answer(f"❌ Ошибка восстановления: {e}")
@@ -608,34 +760,94 @@ async def cmd_add_viewer(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
+    
     args = message.text.split()
     if len(args) != 2:
-        await message.answer("📝 **Как добавить наблюдателя:**\n\nОтправьте: `/add_viewer 123456789`\n\nГде 123456789 — Telegram ID пользователя.", parse_mode="Markdown")
+        await message.answer(
+            "📝 **Как добавить наблюдателя:**\n\n"
+            "Отправьте: `/add_viewer 123456789`\n\n"
+            "Где 123456789 — Telegram ID пользователя.",
+            parse_mode="Markdown"
+        )
         return
+    
     try:
         new_viewer_id = int(args[1])
+        
         if new_viewer_id in TOP_VIEWERS:
             await message.answer(f"❌ Пользователь `{new_viewer_id}` уже имеет доступ", parse_mode="Markdown")
             return
+        
         if new_viewer_id in ADMIN_IDS:
             await message.answer(f"⚠️ Пользователь уже является администратором", parse_mode="Markdown")
             return
+        
         TOP_VIEWERS.append(new_viewer_id)
-        await message.answer(f"✅ **Пользователь добавлен!**\n\n🆔 ID: `{new_viewer_id}`\n\n⚠️ Для постоянного сохранения добавьте ID в переменную `TOP_VIEWERS` в Railway.", parse_mode="Markdown")
+        
+        await message.answer(
+            f"✅ **Пользователь добавлен!**\n\n"
+            f"🆔 ID: `{new_viewer_id}`\n\n"
+            f"⚠️ Для постоянного сохранения добавьте ID в переменную `TOP_VIEWERS` в Railway.",
+            parse_mode="Markdown"
+        )
+        
         try:
             await bot.send_message(new_viewer_id, "✅ **Вам открыт доступ к команде `/top`!**", parse_mode="Markdown")
         except:
             pass
+            
     except ValueError:
         await message.answer("❌ Неверный формат ID.")
 
 # ==================== РЕДАКТИРОВАНИЕ РАССЫЛКИ ====================
+async def show_broadcast_edit_menu(message, broadcast_id):
+    """Показывает меню редактирования рассылки"""
+    b = db.get_broadcast(broadcast_id)
+    if not b:
+        await message.answer("❌ Рассылка не найдена")
+        return
+    
+    group = db.get_target_group(b['group_id'])
+    group_name = group['name'] if group else "?"
+    
+    schedule_info = get_schedule_info(b)
+    status = "✅ Активна" if b['is_active'] else "⛔ Отключена"
+    btn_text = b.get('button_text') or "❌ нет"
+    edit_msg = b.get('edit_message') or "стандартный"
+    
+    text = f"✏️ **Редактирование рассылки**\n\n"
+    text += f"📢 Название: `{b['name']}`\n"
+    text += f"📬 Группа: {group_name}\n"
+    text += f"📝 Текст: {b['text'][:100]}...\n" if len(b['text']) > 100 else f"📝 Текст: {b['text']}\n"
+    text += f"{schedule_info}\n"
+    text += f"🔘 Кнопка: `{btn_text}`\n"
+    text += f"✏️ Текст после нажатия: {edit_msg[:50]}...\n" if len(edit_msg) > 50 else f"✏️ Текст после нажатия: {edit_msg}\n"
+    text += f"📊 Статус: {status}\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Название", callback_data=f"edit_name_{broadcast_id}"),
+         InlineKeyboardButton(text="📝 Текст", callback_data=f"edit_text_{broadcast_id}")],
+        [InlineKeyboardButton(text="🔘 Кнопка", callback_data=f"edit_button_{broadcast_id}"),
+         InlineKeyboardButton(text="✏️ Текст после нажатия", callback_data=f"edit_editmsg_{broadcast_id}")],
+        [InlineKeyboardButton(text="⏰ Расписание", callback_data=f"edit_schedule_{broadcast_id}"),
+         InlineKeyboardButton(text="🔄 Статус", callback_data=f"edit_status_{broadcast_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"edit_delete_{broadcast_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_list")]
+    ])
+    
+    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
 async def update_broadcast_and_reload(broadcast_id, **kwargs):
+    """Обновляет рассылку и перезагружает задачу в планировщике"""
     db.update_broadcast(broadcast_id, **kwargs)
+    
+    # Обновляем задачу в планировщике
     b = db.get_broadcast(broadcast_id)
     job_id = f"broadcast_{broadcast_id}"
+    
     if scheduler.get_job(job_id):
         scheduler.remove_job(job_id)
+    
     if b['is_active']:
         if b['schedule_type'] == 'fixed' and b['hour'] is not None:
             trigger = CronTrigger(hour=b['hour'], minute=b['minute'], timezone=TIMEZONE)
@@ -655,39 +867,193 @@ async def update_broadcast_and_reload(broadcast_id, **kwargs):
                 trigger = CronTrigger(hour=b['start_hour'], minute=b['start_minute'], timezone=TIMEZONE)
                 scheduler.add_job(send_broadcast, trigger, args=[broadcast_id], id=job_id)
 
-async def show_broadcast_edit_menu(message, broadcast_id):
-    b = db.get_broadcast(broadcast_id)
-    if not b:
-        await message.answer("❌ Рассылка не найдена")
+# ==================== CALLBACK ОБРАБОТЧИК ====================
+@dp.callback_query()
+async def handle_callback(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
         return
-    group = db.get_target_group(b['group_id'])
-    group_name = group['name'] if group else "?"
-    schedule_info = get_schedule_info(b)
-    status = "✅ Активна" if b['is_active'] else "⛔ Отключена"
-    btn_text = b.get('button_text') or "❌ нет"
-    edit_msg = b.get('edit_message') or "стандартный"
-    text = f"✏️ **Редактирование рассылки**\n\n📢 Название: `{b['name']}`\n📬 Группа: {group_name}\n📝 Текст: {b['text'][:100]}...\n" if len(b['text']) > 100 else f"📝 Текст: {b['text']}\n"
-    text += f"{schedule_info}\n🔘 Кнопка: `{btn_text}`\n✏️ Текст после нажатия: {edit_msg[:50]}...\n" if len(edit_msg) > 50 else f"✏️ Текст после нажатия: {edit_msg}\n"
-    text += f"📊 Статус: {status}\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Название", callback_data=f"edit_name_{broadcast_id}"), InlineKeyboardButton(text="📝 Текст", callback_data=f"edit_text_{broadcast_id}")],
-        [InlineKeyboardButton(text="🔘 Кнопка", callback_data=f"edit_button_{broadcast_id}"), InlineKeyboardButton(text="✏️ Текст после нажатия", callback_data=f"edit_editmsg_{broadcast_id}")],
-        [InlineKeyboardButton(text="⏰ Расписание", callback_data=f"edit_schedule_{broadcast_id}"), InlineKeyboardButton(text="🔄 Статус", callback_data=f"edit_status_{broadcast_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"edit_delete_{broadcast_id}")],
-        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_list")]
-    ])
-    await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    
+    data = call.data
+    await call.answer()
+    
+    if data == "menu_groups":
+        await show_groups(call.message)
+    elif data == "menu_create":
+        await start_create(call.message)
+    elif data == "menu_list":
+        await show_broadcasts(call.message)
+    elif data == "menu_stats_buttons":
+        await show_buttons_stats(call.message)
+    elif data == "menu_top":
+        await show_top_selector(call.message)
+    elif data == "menu_toggle_all":
+        await toggle_all(call.message)
+    elif data == "menu_stats":
+        await show_stats(call.message)
+    elif data == "back_to_main":
+        await call.message.edit_text("🔧 **Панель администратора**", reply_markup=get_main_menu(), parse_mode="Markdown")
+    elif data == "top_all":
+        await show_all_broadcasts_top(call.message)
+    elif data == "add_group":
+        admin_states[call.from_user.id] = {"step": "add_group_id"}
+        await call.message.answer("📢 Введите ID группы (число):\nПример: -1001234567890")
+    
+    # Редактирование рассылки
+    elif data.startswith("edit_"):
+        parts = data.split("_")
+        if len(parts) >= 3:
+            broadcast_id = int(parts[2])
+            action = parts[1]
+            
+            if action == "name":
+                admin_states[call.from_user.id] = {"step": "edit_name", "broadcast_id": broadcast_id}
+                await call.message.answer("✏️ Введите новое название рассылки:")
+            elif action == "text":
+                admin_states[call.from_user.id] = {"step": "edit_text", "broadcast_id": broadcast_id}
+                await call.message.answer("✏️ Введите новый текст рассылки:")
+            elif action == "button":
+                admin_states[call.from_user.id] = {"step": "edit_button", "broadcast_id": broadcast_id}
+                await call.message.answer("🔘 Введите новый текст кнопки (или отправьте `пропустить` чтобы убрать кнопку):", parse_mode="Markdown")
+            elif action == "editmsg":
+                admin_states[call.from_user.id] = {"step": "edit_editmsg", "broadcast_id": broadcast_id}
+                await call.message.answer(
+                    "✏️ Введите новый текст после нажатия\n\n"
+                    "Доступные переменные:\n"
+                    "`{mention}` - упоминание\n"
+                    "`{name}` - имя\n"
+                    "`{user_id}` - ID\n"
+                    "`{time}` - время\n"
+                    "`{reaction}` - время реакции\n\n"
+                    "Или отправьте `пропустить` для стандартного текста",
+                    parse_mode="Markdown"
+                )
+            elif action == "schedule":
+                admin_states[call.from_user.id] = {"step": "edit_schedule_type", "broadcast_id": broadcast_id}
+                await call.message.answer(
+                    "⏰ **Выберите новый тип расписания**\n\n"
+                    "`1` - В определённое время (ежедневно)\n"
+                    "`2` - Простой интервал\n"
+                    "`3` - Старт в указанное время + интервал\n\n"
+                    "Отправьте 1, 2 или 3:",
+                    parse_mode="Markdown"
+                )
+            elif action == "status":
+                b = db.get_broadcast(broadcast_id)
+                if b:
+                    new_status = not b['is_active']
+                    await update_broadcast_and_reload(broadcast_id, is_active=new_status)
+                    await call.message.answer(f"🔄 Рассылка {'включена ✅' if new_status else 'отключена ⛔'}")
+                    await show_broadcasts(call.message)
+            elif action == "delete":
+                b = db.get_broadcast(broadcast_id)
+                if b:
+                    if scheduler.get_job(f"broadcast_{broadcast_id}"):
+                        scheduler.remove_job(f"broadcast_{broadcast_id}")
+                    db.delete_broadcast(broadcast_id)
+                    await call.message.answer(f"🗑 Рассылка **{b['name']}** удалена", parse_mode="Markdown")
+                    await show_broadcasts(call.message)
+    
+    # Выбор группы для создания рассылки
+    elif data.startswith("select_group_"):
+        gid = int(data.split("_")[2])
+        group = db.get_target_group(gid)
+        if group:
+            admin_states[call.from_user.id] = {
+                "step": "name",
+                "group_id": gid,
+                "group_name": group['name']
+            }
+            await call.message.answer(f"📝 Создание рассылки для **{group['name']}**\n\nВведите название:", parse_mode="Markdown")
+    
+    # Просмотр рассылок группы
+    elif data.startswith("group_show_"):
+        gid = int(data.split("_")[2])
+        await show_group_broadcasts(call.message, gid)
+    
+    # Просмотр/редактирование конкретной рассылки из списка
+    elif data.startswith("broadcast_show_"):
+        bid = int(data.split("_")[2])
+        await show_broadcast_edit_menu(call.message, bid)
+    
+    # Включение/выключение рассылки
+    elif data.startswith("broadcast_toggle_"):
+        bid = int(data.split("_")[2])
+        b = db.get_broadcast(bid)
+        if b:
+            new_status = not b['is_active']
+            await update_broadcast_and_reload(bid, is_active=new_status)
+            await call.message.answer(f"🔄 Рассылка {b['name']}: {'включена ✅' if new_status else 'отключена ⛔'}")
+            await show_broadcasts(call.message)
+    
+    # Удаление рассылки
+    elif data.startswith("broadcast_delete_"):
+        bid = int(data.split("_")[2])
+        b = db.get_broadcast(bid)
+        if b:
+            if scheduler.get_job(f"broadcast_{bid}"):
+                scheduler.remove_job(f"broadcast_{bid}")
+            db.delete_broadcast(bid)
+            await call.message.answer(f"🗑 Рассылка {b['name']} удалена")
+            await show_broadcasts(call.message)
+    
+    # Управление группами
+    elif data.startswith("group_toggle_"):
+        gid = int(data.split("_")[2])
+        group = db.get_target_group(gid)
+        if group:
+            new_status = not group['is_active']
+            db.toggle_target_group(gid, 1 if new_status else 0)
+            for b in db.get_all_broadcasts(gid):
+                if new_status:
+                    await update_broadcast_and_reload(b['id'], is_active=True)
+                else:
+                    if scheduler.get_job(f"broadcast_{b['id']}"):
+                        scheduler.remove_job(f"broadcast_{b['id']}")
+            await call.message.answer(f"🔄 Группа {group['name']}: {'включена ✅' if new_status else 'отключена ⛔'}")
+            await show_groups(call.message)
+    
+    elif data.startswith("group_delete_"):
+        gid = int(data.split("_")[2])
+        group = db.get_target_group(gid)
+        if group:
+            for b in db.get_all_broadcasts(gid):
+                if scheduler.get_job(f"broadcast_{b['id']}"):
+                    scheduler.remove_job(f"broadcast_{b['id']}")
+            db.delete_target_group(gid)
+            await call.message.answer(f"🗑 Группа {group['name']} удалена")
+            await show_groups(call.message)
+    
+    # Статистика кнопок
+    elif data.startswith("stats_"):
+        bid = int(data.split("_")[1])
+        await show_broadcast_stats(call.message, bid)
+    
+    # Топ для конкретной рассылки
+    elif data.startswith("top_"):
+        bid = int(data.split("_")[1])
+        await show_broadcast_top(call.message, bid)
+    
+    elif data.startswith("top_group_"):
+        group_id = int(data.split("_")[2])
+        await show_group_top(call.message, group_id)
 
 # ==================== ОТОБРАЖЕНИЕ МЕНЮ ====================
 async def show_groups(message):
     groups = db.get_all_target_groups()
     text = "📢 **Группы для рассылок**\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
     for g in groups:
         status = "✅" if g['is_active'] else "⛔"
         cnt = len(db.get_all_broadcasts(g['id']))
         text += f"{status} **{g['name']}**\n   🆔 `{g['chat_id']}`\n   📋 {cnt} рассылок\n\n"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📋 {g['name'][:15]}", callback_data=f"group_show_{g['id']}"), InlineKeyboardButton(text="🔘", callback_data=f"group_toggle_{g['id']}"), InlineKeyboardButton(text="🗑", callback_data=f"group_delete_{g['id']}")])
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📋 {g['name'][:15]}", callback_data=f"group_show_{g['id']}"),
+            InlineKeyboardButton(text="🔘", callback_data=f"group_toggle_{g['id']}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"group_delete_{g['id']}")
+        ])
+    
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить группу", callback_data="add_group")])
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -698,7 +1064,7 @@ async def show_group_broadcasts(message, group_id):
         return
     broadcasts = db.get_all_broadcasts(group_id)
     text = f"📋 **Рассылки группы:** {group['name']}\n\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
     if not broadcasts:
         text += "Нет рассылок"
     else:
@@ -707,8 +1073,15 @@ async def show_group_broadcasts(message, group_id):
             schedule_info = get_schedule_info(b)
             btn = f" 🔘 {b['button_text']}" if b.get('button_text') else ""
             text += f"{status} **{b['name']}**{btn}\n   ⏰ {schedule_info}\n\n"
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="➕ Создать рассылку", callback_data=f"select_group_{group_id}")])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад к группам", callback_data="menu_groups")])
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
+            ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать рассылку", callback_data=f"select_group_{group_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к группам", callback_data="menu_groups")]
+    ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_broadcasts(message):
@@ -716,24 +1089,21 @@ async def show_broadcasts(message):
     if not all_b:
         await message.edit_text("📭 **Нет рассылок**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
-    broadcasts_by_group = {}
-    for b in all_b:
-        group_id = b['group_id']
-        if group_id not in broadcasts_by_group:
-            broadcasts_by_group[group_id] = []
-        broadcasts_by_group[group_id].append(b)
+    
     text = "📋 **Все рассылки**\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for group_id, broadcasts in broadcasts_by_group.items():
-        group = db.get_target_group(group_id)
-        group_name = group['name'] if group else f"Группа {group_id}"
-        text += f"📢 **{group_name}**\n"
-        for b in broadcasts:
-            status = "✅" if b['is_active'] else "⛔"
-            btn = f" [{b['button_text']}]" if b.get('button_text') else ""
-            text += f"   {status} **{b['name']}**{btn}\n"
-            keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"), InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")])
-        text += "\n"
+    
+    for b in all_b:
+        group = db.get_target_group(b['group_id'])
+        gname = group['name'] if group else "?"
+        status = "✅" if b['is_active'] else "⛔"
+        btn = f" [{b['button_text']}]" if b.get('button_text') else ""
+        text += f"{status} **{b['name']}**{btn} → {gname}\n"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
+        ])
+    
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -742,20 +1112,27 @@ async def show_buttons_stats(message):
     if not broadcasts:
         await message.edit_text("📭 **Нет рассылок с кнопками**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]))
         return
+    
     text = "📊 **Статистика по кнопкам**\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
     for b in broadcasts:
         cnt = db.get_clicks_count(b['id'])
         text += f"🔘 **{b['name']}**\n   📢 Кнопка: `{b['button_text']}`\n   👆 Нажатий: {cnt}\n\n"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📊 {b['name'][:20]} ({cnt})", callback_data=f"stats_{b['id']}")])
+    
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_top_selector(message):
     groups = db.get_all_target_groups()
     broadcasts = [b for b in db.get_all_broadcasts() if b.get('button_text')]
+    
     text = "📊 **Выберите режим просмотра**\n\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Общий топ (все группы)", callback_data="top_all")]])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Общий топ (все группы)", callback_data="top_all")]
+    ])
+    
     if groups:
         text += "**Или выберите группу:**\n\n"
         for g in groups:
@@ -763,6 +1140,7 @@ async def show_top_selector(message):
             status = "✅" if g['is_active'] else "⛔"
             text += f"{status} **{g['name']}** — {cnt} нажатий\n"
             keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📊 {g['name'][:25]}", callback_data=f"top_group_{g['id']}")])
+    
     if broadcasts:
         text += "\n**Или выберите конкретную рассылку:**\n\n"
         for b in broadcasts:
@@ -771,6 +1149,7 @@ async def show_top_selector(message):
             gname = group['name'] if group else "?"
             text += f"🔘 {b['name']} ({gname}) — {cnt} нажатий\n"
             keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📨 {b['name'][:25]}", callback_data=f"top_{b['id']}")])
+    
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -779,11 +1158,18 @@ async def show_broadcast_top(message, broadcast_id):
     if not b:
         await message.answer("❌ Рассылка не найдена")
         return
+    
     top = db.get_top_fastest(broadcast_id, 20)
+    
     if not top:
         await message.edit_text(f"📭 Нет нажатий на кнопку рассылки **{b['name']}**", parse_mode="Markdown")
         return
-    text = f"📊 **Статистика по рассылке**\n\n📢 Рассылка: **{b['name']}**\n🔘 Кнопка: `{b['button_text']}`\n\n**Рейтинг (по средней скорости):**\n\n"
+    
+    text = f"📊 **Статистика по рассылке**\n\n"
+    text += f"📢 Рассылка: **{b['name']}**\n"
+    text += f"🔘 Кнопка: `{b['button_text']}`\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
     medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(top):
         user_id, username, first_name, avg_time, clicks_count = row
@@ -793,7 +1179,10 @@ async def show_broadcast_top(message, broadcast_id):
         if len(name) > 20:
             name = name[:17] + "..."
         text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_top")]])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_top")]
+    ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_group_top(message, group_id):
@@ -801,13 +1190,22 @@ async def show_group_top(message, group_id):
     if not group:
         await message.answer("❌ Группа не найдена")
         return
+    
     top = db.get_top_fastest_by_group(group_id, 20)
+    
     if not top:
         await message.edit_text(f"📭 Нет данных о реакции в группе {group['name']}", parse_mode="Markdown")
         return
+    
     total_clicks = db.get_total_clicks_by_group(group_id)
     total_users = db.get_total_users_by_group(group_id)
-    text = f"📊 **Список времени реакции сотрудников**\n\n📢 Группа: **{group['name']}**\n👆 Всего нажатий: {total_clicks}\n👥 Участников: {total_users}\n\n**Рейтинг (по средней скорости):**\n\n"
+    
+    text = f"📊 **Список времени реакции сотрудников**\n\n"
+    text += f"📢 Группа: **{group['name']}**\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
     medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(top):
         user_id, username, first_name, avg_time, clicks_count = row
@@ -817,17 +1215,28 @@ async def show_group_top(message, group_id):
         if len(name) > 20:
             name = name[:17] + "..."
         text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
+    ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_all_broadcasts_top(message):
     top = db.get_top_fastest_all(20)
+    
     if not top:
         await message.edit_text("📭 **Нет данных о реакции сотрудников**", parse_mode="Markdown")
         return
+    
     total_clicks = db.get_total_clicks_all()
     total_users = db.get_total_users_all()
-    text = f"📊 **Общий список времени реакции сотрудников**\n\n📅 Данные собраны за всё время\n👆 Всего нажатий: {total_clicks}\n👥 Участников: {total_users}\n\n**Рейтинг (по средней скорости):**\n\n"
+    
+    text = f"📊 **Общий список времени реакции сотрудников**\n\n"
+    text += f"📅 Данные собраны за всё время\n"
+    text += f"👆 Всего нажатий: {total_clicks}\n"
+    text += f"👥 Участников: {total_users}\n\n"
+    text += "**Рейтинг (по средней скорости):**\n\n"
+    
     medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(top):
         user_id, username, first_name, avg_time, clicks_count = row
@@ -837,15 +1246,23 @@ async def show_all_broadcasts_top(message):
         if len(name) > 20:
             name = name[:17] + "..."
         text += f"{medal} **{name}** — {avg_str} ({clicks_count} наж.)\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="menu_top")]
+    ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_broadcast_stats(message, broadcast_id):
     b = db.get_broadcast(broadcast_id)
     if not b:
         return
+    
     clicks = db.get_clicks(broadcast_id)
-    text = f"📊 **Статистика рассылки**\n\n📢 Название: {b['name']}\n🔘 Кнопка: `{b['button_text']}`\n👆 Всего нажатий: {len(clicks)}\n\n"
+    text = f"📊 **Статистика рассылки**\n\n"
+    text += f"📢 Название: {b['name']}\n"
+    text += f"🔘 Кнопка: `{b['button_text']}`\n"
+    text += f"👆 Всего нажатий: {len(clicks)}\n\n"
+    
     if clicks:
         text += "**Последние нажатия:**\n"
         for click in clicks[:20]:
@@ -856,12 +1273,17 @@ async def show_broadcast_stats(message, broadcast_id):
             text += f"\n...и ещё {len(clicks) - 20} нажатий"
     else:
         text += "Пока нет нажатий на кнопку."
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Список реакции", callback_data=f"top_{broadcast_id}"), InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_stats_buttons")]])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Список реакции", callback_data=f"top_{broadcast_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="menu_stats_buttons")]
+    ])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def toggle_all(message):
     all_b = db.get_all_broadcasts()
     active = any(b['is_active'] for b in all_b)
+    
     for b in all_b:
         new_status = not active
         db.update_broadcast(b['id'], is_active=new_status)
@@ -885,6 +1307,7 @@ async def toggle_all(message):
         else:
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
+    
     await message.answer(f"⏸ Все рассылки {'отключены' if not active else 'включены'}")
     await show_broadcasts(message)
 
@@ -894,7 +1317,17 @@ async def show_stats(message):
     active = sum(1 for b in broadcasts if b['is_active'])
     total_clicks = sum(db.get_clicks_count(b['id']) for b in broadcasts)
     buttons_count = sum(1 for b in broadcasts if b.get('button_text'))
-    await message.answer(f"📊 **Общая статистика**\n\n📢 Групп: {len(groups)}\n📋 Рассылок: {len(broadcasts)}\n✅ Активных: {active}\n🔘 С кнопками: {buttons_count}\n👆 Всего нажатий: {total_clicks}\n🕐 Часовой пояс: {TIMEZONE}", parse_mode="Markdown")
+    
+    await message.answer(
+        f"📊 **Общая статистика**\n\n"
+        f"📢 Групп: {len(groups)}\n"
+        f"📋 Рассылок: {len(broadcasts)}\n"
+        f"✅ Активных: {active}\n"
+        f"🔘 С кнопками: {buttons_count}\n"
+        f"👆 Всего нажатий: {total_clicks}\n"
+        f"🕐 Часовой пояс: {TIMEZONE}",
+        parse_mode="Markdown"
+    )
 
 # ==================== СОЗДАНИЕ РАССЫЛКИ ====================
 async def start_create(message):
@@ -902,10 +1335,12 @@ async def start_create(message):
     if not groups:
         await message.answer("❌ Нет активных групп. Добавьте группу через /start в ней.")
         return
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for g in groups:
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📢 {g['name']}", callback_data=f"select_group_{g['id']}")])
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
+    
     await message.edit_text("📝 **Выберите группу для рассылки**", reply_markup=keyboard, parse_mode="Markdown")
 
 # ==================== ОБРАБОТКА ВВОДА АДМИНА ====================
@@ -915,39 +1350,48 @@ async def handle_input(message: Message):
         return
     if message.from_user.id not in admin_states:
         return
+    
     state = admin_states[message.from_user.id]
     step = state.get("step")
     broadcast_id = state.get("broadcast_id")
     
-    # РЕДАКТИРОВАНИЕ
+    # === РЕДАКТИРОВАНИЕ ===
     if step == "edit_name":
-        await update_broadcast_and_reload(broadcast_id, name=message.text)
-        await message.answer(f"✅ Название рассылки изменено на: {message.text}")
+        new_name = message.text
+        await update_broadcast_and_reload(broadcast_id, name=new_name)
+        await message.answer(f"✅ Название рассылки изменено на: {new_name}")
         del admin_states[message.from_user.id]
         await show_broadcasts(message)
+    
     elif step == "edit_text":
-        await update_broadcast_and_reload(broadcast_id, text=message.text)
+        new_text = message.text
+        await update_broadcast_and_reload(broadcast_id, text=new_text)
         await message.answer(f"✅ Текст рассылки изменён")
         del admin_states[message.from_user.id]
         await show_broadcasts(message)
+    
     elif step == "edit_button":
         if message.text.lower() in ["пропустить", "skip", "-", "нет"]:
-            await update_broadcast_and_reload(broadcast_id, button_text=None)
+            new_button_text = None
             await message.answer("✅ Кнопка убрана")
         else:
-            await update_broadcast_and_reload(broadcast_id, button_text=message.text[:50])
-            await message.answer(f"✅ Текст кнопки изменён на: {message.text[:50]}")
+            new_button_text = message.text[:50]
+            await message.answer(f"✅ Текст кнопки изменён на: {new_button_text}")
+        await update_broadcast_and_reload(broadcast_id, button_text=new_button_text)
         del admin_states[message.from_user.id]
         await show_broadcasts(message)
+    
     elif step == "edit_editmsg":
         if message.text.lower() in ["пропустить", "skip", "-"]:
-            await update_broadcast_and_reload(broadcast_id, edit_message="✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}")
+            new_edit_msg = "✅ Нажал: {mention}\n🆔 ID: {user_id}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
             await message.answer("✅ Текст после нажатия сброшен на стандартный")
         else:
-            await update_broadcast_and_reload(broadcast_id, edit_message=message.text)
+            new_edit_msg = message.text
             await message.answer("✅ Текст после нажатия изменён")
+        await update_broadcast_and_reload(broadcast_id, edit_message=new_edit_msg)
         del admin_states[message.from_user.id]
         await show_broadcasts(message)
+    
     elif step == "edit_schedule_type":
         if message.text == "1":
             state["new_schedule_type"] = "fixed"
@@ -963,19 +1407,31 @@ async def handle_input(message: Message):
             await message.answer(f"🚀 Введите первое время в формате `HH:MM` (часовой пояс {TIMEZONE})", parse_mode="Markdown")
         else:
             await message.answer("❌ Отправьте 1, 2 или 3")
+    
     elif step == "edit_fixed_time":
         time_str = message.text.strip().replace(' ', '')
         if ':' not in time_str:
             await message.answer("❌ Неверный формат. Используйте разделитель `:`\n\nПример: `14:30`", parse_mode="Markdown")
             return
+        
         parts = time_str.split(':')
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Используйте формат `HH:MM`", parse_mode="Markdown")
             return
+        
         try:
-            h = int(parts[0]); m = int(parts[1])
+            h = int(parts[0])
+            m = int(parts[1])
             if 0 <= h <= 23 and 0 <= m <= 59:
-                await update_broadcast_and_reload(broadcast_id, schedule_type="fixed", hour=h, minute=m, interval_minutes=None, start_hour=None, start_minute=None)
+                await update_broadcast_and_reload(
+                    broadcast_id,
+                    schedule_type="fixed",
+                    hour=h,
+                    minute=m,
+                    interval_minutes=None,
+                    start_hour=None,
+                    start_minute=None
+                )
                 await message.answer(f"✅ Расписание изменено: ежедневно в {h:02d}:{m:02d}")
                 del admin_states[message.from_user.id]
                 await show_broadcasts(message)
@@ -983,11 +1439,20 @@ async def handle_input(message: Message):
                 await message.answer("❌ Неверное время. Часы от 0 до 23, минуты от 0 до 59.", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите числа.", parse_mode="Markdown")
+    
     elif step == "edit_interval":
         try:
             interval = int(message.text.strip())
             if interval > 0:
-                await update_broadcast_and_reload(broadcast_id, schedule_type="interval", interval_minutes=interval, hour=None, minute=None, start_hour=None, start_minute=None)
+                await update_broadcast_and_reload(
+                    broadcast_id,
+                    schedule_type="interval",
+                    interval_minutes=interval,
+                    hour=None,
+                    minute=None,
+                    start_hour=None,
+                    start_minute=None
+                )
                 await message.answer(f"✅ Расписание изменено: каждые {interval} минут")
                 del admin_states[message.from_user.id]
                 await show_broadcasts(message)
@@ -995,31 +1460,52 @@ async def handle_input(message: Message):
                 await message.answer("❌ Введите положительное число (больше 0).", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите целое число.", parse_mode="Markdown")
+    
     elif step == "edit_start_time":
         time_str = message.text.strip().replace(' ', '')
         if ':' not in time_str:
             await message.answer("❌ Неверный формат. Используйте разделитель `:`\n\nПример: `14:30`", parse_mode="Markdown")
             return
+        
         parts = time_str.split(':')
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Используйте формат `HH:MM`", parse_mode="Markdown")
             return
+        
         try:
-            h = int(parts[0]); m = int(parts[1])
+            h = int(parts[0])
+            m = int(parts[1])
             if 0 <= h <= 23 and 0 <= m <= 59:
                 state["new_start_hour"] = h
                 state["new_start_minute"] = m
                 state["step"] = "edit_interval_after_start"
-                await message.answer("⏰ **Интервал повторения**\n\nВведите интервал в минутах (через сколько минут повторять):\n\nПримеры:\n`120` - каждые 2 часа\n`60` - каждый час\n\nОтправьте число:", parse_mode="Markdown")
+                await message.answer(
+                    "⏰ **Интервал повторения**\n\n"
+                    "Введите интервал в минутах (через сколько минут повторять):\n\n"
+                    "Примеры:\n"
+                    "`120` - каждые 2 часа\n"
+                    "`60` - каждый час\n\n"
+                    "Отправьте число:",
+                    parse_mode="Markdown"
+                )
             else:
                 await message.answer("❌ Неверное время. Часы от 0 до 23, минуты от 0 до 59.", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите числа.", parse_mode="Markdown")
+    
     elif step == "edit_interval_after_start":
         try:
             interval = int(message.text.strip())
             if interval > 0:
-                await update_broadcast_and_reload(broadcast_id, schedule_type="start_at_interval", interval_minutes=interval, start_hour=state["new_start_hour"], start_minute=state["new_start_minute"], hour=None, minute=None)
+                await update_broadcast_and_reload(
+                    broadcast_id,
+                    schedule_type="start_at_interval",
+                    interval_minutes=interval,
+                    start_hour=state["new_start_hour"],
+                    start_minute=state["new_start_minute"],
+                    hour=None,
+                    minute=None
+                )
                 await message.answer(f"✅ Расписание изменено: старт {state['new_start_hour']:02d}:{state['new_start_minute']:02d}, затем каждые {interval} минут")
                 del admin_states[message.from_user.id]
                 await show_broadcasts(message)
@@ -1028,7 +1514,7 @@ async def handle_input(message: Message):
         except ValueError:
             await message.answer("❌ Неверный формат. Введите целое число.", parse_mode="Markdown")
     
-    # ДОБАВЛЕНИЕ ГРУППЫ
+    # === ДОБАВЛЕНИЕ ГРУППЫ ===
     elif step == "add_group_id":
         try:
             chat_id = int(message.text.strip())
@@ -1043,32 +1529,64 @@ async def handle_input(message: Message):
         except:
             await message.answer("❌ Неверный ID. Введите число.")
     
-    # СОЗДАНИЕ НОВОЙ РАССЫЛКИ
+    # === СОЗДАНИЕ НОВОЙ РАССЫЛКИ ===
     elif step == "name":
         state["name"] = message.text
         state["step"] = "text"
         await message.answer("📝 **Введите текст рассылки**", parse_mode="Markdown")
+    
     elif step == "text":
         state["text"] = message.text
         state["step"] = "button"
-        await message.answer("🔘 **Добавить кнопку?**\n\nОтправьте текст кнопки или `пропустить`", parse_mode="Markdown")
+        await message.answer(
+            "🔘 **Добавить кнопку?**\n\n"
+            "Отправьте текст кнопки или `пропустить`",
+            parse_mode="Markdown"
+        )
+    
     elif step == "button":
         if message.text.lower() in ["пропустить", "skip", "-"]:
             state["button_text"] = None
             state["edit_message"] = None
             state["step"] = "schedule_type"
-            await message.answer("⏰ **Тип расписания**\n\n`1` - В определённое время (ежедневно)\n`2` - Простой интервал\n`3` - Старт в указанное время + интервал\n\nОтправьте 1, 2 или 3:", parse_mode="Markdown")
+            await message.answer(
+                "⏰ **Тип расписания**\n\n"
+                "`1` - В определённое время (ежедневно)\n"
+                "`2` - Простой интервал\n"
+                "`3` - Старт в указанное время + интервал\n\n"
+                "Отправьте 1, 2 или 3:",
+                parse_mode="Markdown"
+            )
         else:
             state["button_text"] = message.text[:50]
             state["step"] = "edit_message"
-            await message.answer("✏️ **Текст после нажатия**\n\nДоступные переменные:\n`{mention}` - упоминание\n`{name}` - имя\n`{user_id}` - ID\n`{time}` - время (ЧЧ:ММ)\n`{reaction}` - время реакции\n\nОтправьте текст или `пропустить`", parse_mode="Markdown")
+            await message.answer(
+                "✏️ **Текст после нажатия**\n\n"
+                "Доступные переменные:\n"
+                "`{mention}` - упоминание\n"
+                "`{name}` - имя\n"
+                "`{user_id}` - ID\n"
+                "`{time}` - время (ЧЧ:ММ)\n"
+                "`{reaction}` - время реакции\n\n"
+                "Отправьте текст или `пропустить`",
+                parse_mode="Markdown"
+            )
+    
     elif step == "edit_message":
         if message.text.lower() in ["пропустить", "skip", "-"]:
             state["edit_message"] = "✅ Нажал: {mention}\n🕐 Время: {time}\n⚡ Реакция: {reaction}"
         else:
             state["edit_message"] = message.text
         state["step"] = "schedule_type"
-        await message.answer("⏰ **Тип расписания**\n\n`1` - В определённое время (ежедневно)\n`2` - Простой интервал (каждые X минут)\n`3` - Старт в указанное время + интервал\n\nОтправьте 1, 2 или 3:", parse_mode="Markdown")
+        await message.answer(
+            "⏰ **Тип расписания**\n\n"
+            "`1` - В определённое время (ежедневно)\n"
+            "`2` - Простой интервал (каждые X минут)\n"
+            "`3` - Старт в указанное время + интервал\n\n"
+            "Отправьте 1, 2 или 3:",
+            parse_mode="Markdown"
+        )
+    
     elif step == "schedule_type":
         if message.text == "1":
             state["schedule_type"] = "fixed"
@@ -1084,17 +1602,21 @@ async def handle_input(message: Message):
             await message.answer(f"🚀 Введите первое время в формате `HH:MM` (часовой пояс {TIMEZONE})", parse_mode="Markdown")
         else:
             await message.answer("❌ Отправьте 1, 2 или 3")
+    
     elif step == "fixed_time":
         time_str = message.text.strip().replace(' ', '')
         if ':' not in time_str:
             await message.answer("❌ Неверный формат. Используйте разделитель `:`\n\nПример: `14:30`", parse_mode="Markdown")
             return
+        
         parts = time_str.split(':')
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Используйте формат `HH:MM`", parse_mode="Markdown")
             return
+        
         try:
-            h = int(parts[0]); m = int(parts[1])
+            h = int(parts[0])
+            m = int(parts[1])
             if 0 <= h <= 23 and 0 <= m <= 59:
                 state["hour"] = h
                 state["minute"] = m
@@ -1103,6 +1625,7 @@ async def handle_input(message: Message):
                 await message.answer("❌ Неверное время. Часы от 0 до 23, минуты от 0 до 59.", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите числа.", parse_mode="Markdown")
+    
     elif step == "interval":
         try:
             interval = int(message.text.strip())
@@ -1113,26 +1636,39 @@ async def handle_input(message: Message):
                 await message.answer("❌ Введите положительное число (больше 0).", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите целое число.", parse_mode="Markdown")
+    
     elif step == "start_time":
         time_str = message.text.strip().replace(' ', '')
         if ':' not in time_str:
             await message.answer("❌ Неверный формат. Используйте разделитель `:`\n\nПример: `14:30`", parse_mode="Markdown")
             return
+        
         parts = time_str.split(':')
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Используйте формат `HH:MM`", parse_mode="Markdown")
             return
+        
         try:
-            h = int(parts[0]); m = int(parts[1])
+            h = int(parts[0])
+            m = int(parts[1])
             if 0 <= h <= 23 and 0 <= m <= 59:
                 state["start_hour"] = h
                 state["start_minute"] = m
                 state["step"] = "interval_after_start"
-                await message.answer("⏰ **Интервал повторения**\n\nВведите интервал в минутах (через сколько минут повторять):\n\nПримеры:\n`120` - каждые 2 часа\n`60` - каждый час\n\nОтправьте число:", parse_mode="Markdown")
+                await message.answer(
+                    "⏰ **Интервал повторения**\n\n"
+                    "Введите интервал в минутах (через сколько минут повторять):\n\n"
+                    "Примеры:\n"
+                    "`120` - каждые 2 часа\n"
+                    "`60` - каждый час\n\n"
+                    "Отправьте число:",
+                    parse_mode="Markdown"
+                )
             else:
                 await message.answer("❌ Неверное время. Часы от 0 до 23, минуты от 0 до 59.", parse_mode="Markdown")
         except ValueError:
             await message.answer("❌ Неверный формат. Введите числа.", parse_mode="Markdown")
+    
     elif step == "interval_after_start":
         try:
             interval = int(message.text.strip())
@@ -1146,14 +1682,26 @@ async def handle_input(message: Message):
 
 async def save_broadcast(message, state):
     broadcast_id = db.add_broadcast(
-        group_id=state["group_id"], name=state["name"], text=state["text"], schedule_type=state["schedule_type"],
-        hour=state.get("hour"), minute=state.get("minute"), interval_minutes=state.get("interval_minutes"),
-        start_hour=state.get("start_hour"), start_minute=state.get("start_minute"),
-        button_text=state.get("button_text"), edit_message=state.get("edit_message")
+        group_id=state["group_id"],
+        name=state["name"],
+        text=state["text"],
+        schedule_type=state["schedule_type"],
+        hour=state.get("hour"),
+        minute=state.get("minute"),
+        interval_minutes=state.get("interval_minutes"),
+        start_hour=state.get("start_hour"),
+        start_minute=state.get("start_minute"),
+        button_text=state.get("button_text"),
+        edit_message=state.get("edit_message")
     )
+    
+    # Добавляем задачу в планировщик
     await update_broadcast_and_reload(broadcast_id, is_active=True)
+    
     group = db.get_target_group(state["group_id"])
+    
     btn_info = f"\n🔘 Кнопка: `{state['button_text']}`" if state.get('button_text') else ""
+    
     if state["schedule_type"] == "fixed":
         schedule_info = f"⏰ {state['hour']:02d}:{state['minute']:02d} ежедневно"
     elif state["schedule_type"] == "interval":
@@ -1173,9 +1721,20 @@ async def save_broadcast(message, state):
         else:
             interval_str = f"каждые {minutes}мин"
         schedule_info = f"🚀 старт {state['start_hour']:02d}:{state['start_minute']:02d}, затем {interval_str}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Вернуться в админ-панель", callback_data="back_to_main")]])
-    await message.answer(f"✅ **Рассылка создана!**\n\n📢 Название: {state['name']}\n📬 Группа: {group['name']}\n{schedule_info}{btn_info}\n\n✏️ Редактировать рассылку можно через меню 'Все рассылки'", reply_markup=keyboard, parse_mode="Markdown")
+    
+    await message.answer(
+        f"✅ **Рассылка создана!**\n\n"
+        f"📢 Название: {state['name']}\n"
+        f"📬 Группа: {group['name']}\n"
+        f"{schedule_info}{btn_info}\n\n"
+        f"✏️ Теперь вы можете редактировать рассылку через меню 'Все рассылки'\n"
+        f"🔍 Команда `/debug` — диагностика\n"
+        f"💾 БД сохранена в: {DB_PATH}",
+        parse_mode="Markdown"
+    )
+    
     logger.info(f"➕ Создана рассылка: {state['name']} в группу {group['name']} | Тип: {state['schedule_type']}")
+    
     del admin_states[message.from_user.id]
 
 # ==================== ЗАПУСК БОТА ====================
@@ -1185,6 +1744,7 @@ async def main():
     logger.info(f"👑 Администраторы: {ADMIN_IDS}")
     logger.info(f"👁 Наблюдатели (/top): {TOP_VIEWERS}")
     logger.info(f"💾 Путь к базе данных: {DB_PATH}")
+    
     if os.path.exists(VOLUME_PATH):
         logger.info(f"✅ Volume найден по пути: {VOLUME_PATH}")
         if os.access(VOLUME_PATH, os.W_OK):
@@ -1193,9 +1753,13 @@ async def main():
             logger.warning(f"⚠️ Нет прав на запись в Volume!")
     else:
         logger.warning(f"⚠️ Volume не найден, БД будет сохранена локально")
+    
     await load_broadcasts()
     scheduler.start()
+    
     logger.info("✅ БОТ ГОТОВ К РАБОТЕ!")
+    logger.info(f"✅ Бот запущен! База данных: {DB_PATH}")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
