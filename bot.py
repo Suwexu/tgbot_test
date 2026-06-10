@@ -902,11 +902,13 @@ async def show_group_broadcasts(message, group_id):
             schedule_info = get_schedule_info(b)
             btn = f" 🔘 {b['button_text']}" if b.get('button_text') else ""
             text += f"{status} **{b['name']}**{btn}\n   ⏰ {schedule_info}\n\n"
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text=f"✏️ {b['name'][:20]}", callback_data=f"broadcast_show_{b['id']}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"broadcast_delete_{b['id']}")
+            ])
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать рассылку", callback_data=f"select_group_{group_id}")],
-        [InlineKeyboardButton(text="◀️ Назад к группам", callback_data="menu_groups")]
-    ])
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="➕ Создать рассылку", callback_data=f"select_group_{group_id}")])
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад к группам", callback_data="menu_groups")])
     await message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def show_broadcasts(message):
